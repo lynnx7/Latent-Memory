@@ -1,4 +1,4 @@
-name: hello-world
+name: hello-world 2
 
 on:
   workflow_dispatch:
@@ -8,12 +8,7 @@ jobs:
     runs-on: self-hosted
 
     steps:
-      - name: Show machine info
+      - name: Show dir
         run: |
-          echo "Hello World!"
-          echo "This job is running on:"
-          hostname
+          ls
 
-      - name: Check GPU
-        run: |
-          nvidia-smi || echo "No GPU detected"
