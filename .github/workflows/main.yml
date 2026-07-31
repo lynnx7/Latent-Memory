@@ -13,14 +13,17 @@ jobs:
       # - name: Install uv
       #   uses: astral-sh/setup-uv@v5
 
-      - name: Setup uv environment
-        run: |
-          export UV_CACHE_DIR="$HOME/.cache/uv"
-          uv sync --frozen
+    - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
-      # - name: Setup conda env
-      #   shell: bash -l {0}
-      #   run: |
-      #     conda create -n recursivemas python=3.10 -y
+    - name: Check uv
+      run: |
+        which uv
+        uv --version
+
+    - name: Setup uv environment
+      run: |
+        export UV_CACHE_DIR="$HOME/.cache/uv"
+        uv sync --frozen
 
 
