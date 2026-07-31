@@ -30,6 +30,7 @@ jobs:
         working-directory: RecursiveMAS
         run: |
           export UV_CACHE_DIR="$HOME/.cache/uv"
+          uv lock
           uv sync --frozen
 
       - name: Prepare data
