@@ -1,14 +1,23 @@
-name: hello-world 2
+name: remote-gpu-exp
 
 on:
   workflow_dispatch:
 
 jobs:
-  hello:
+  run:
     runs-on: self-hosted
 
     steps:
-      - name: Show dir
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check GPU
         run: |
-          ls
+          nvidia-smi
+
+      - name: Setup conda env
+        shell: bash -l {0}
+        run: |
+          conda create -n recursivemas python=3.10 -y
+
 
