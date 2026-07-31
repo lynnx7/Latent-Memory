@@ -33,5 +33,6 @@ jobs:
 
       - name: Setup uv environment
         run: |
+          cd RecursiveMAS
           export UV_CACHE_DIR="$HOME/.cache/uv"
           uv sync --frozen
