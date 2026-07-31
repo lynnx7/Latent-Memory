@@ -13,11 +13,11 @@ jobs:
 
       - name: Check GPU
         run: |
-          nvidia-smi
+          which conda
 
-      - name: Setup conda env
-        shell: bash -l {0}
-        run: |
-          conda create -n recursivemas python=3.10 -y
+      # - name: Setup conda env
+      #   shell: bash -l {0}
+      #   run: |
+      #     conda create -n recursivemas python=3.10 -y
 
 
