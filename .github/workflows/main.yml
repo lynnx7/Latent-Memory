@@ -11,8 +11,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # - name: Install uv
-      #   uses: astral-sh/setup-uv@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
       # - name: Check uv
       #   run: |
@@ -31,3 +31,24 @@ jobs:
         run: |
           export UV_CACHE_DIR="$HOME/.cache/uv"
           uv sync --frozen
+
+      - name: Prepare data
+        run: |
+          export DATA_ROOT="$HOME/datasets/world-collapse"
+          export DATA_VERSION="${{ inputs.data_version }}"
+          export HF_HOME="$HOME/hf_cache"
+          export HF_DATASETS_CACHE="$HOME/hf_cache/datasets"
+          export TRANSFORMERS_CACHE="$HOME/hf_cache/transformers"
+
+      - name: Run EXP
+        working-directory: RecursiveMAS
+        run: |
+          export DATA_ROOT="$HOME/datasets/world-collapse"
+          export HF_HOME="$HOME/hf_cache"
+          export HF_DATASETS_CACHE="$HOME/hf_cache/datasets"
+          export TRANSFORMERS_CACHE="$HOME/hf_cache/transformers"
+
+          uv run python inference/run.py \
+                --style sequential_light \
+                --dataset livecodebench \
+                --device cuda
