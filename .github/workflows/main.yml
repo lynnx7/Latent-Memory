@@ -11,9 +11,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check GPU
+
+      - name: Setup uv environment
         run: |
-          which conda
+          export UV_CACHE_DIR="$HOME/.cache/uv"
+          uv sync --frozen
 
       # - name: Setup conda env
       #   shell: bash -l {0}
