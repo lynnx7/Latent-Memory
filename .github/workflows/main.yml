@@ -32,7 +32,8 @@ jobs:
           uv --version
 
       - name: Setup uv environment
+        working-directory: RecursiveMAS
         run: |
-          cd RecursiveMAS
           export UV_CACHE_DIR="$HOME/.cache/uv"
-          uv sync --frozen
+          uv lock
+          uv sync
