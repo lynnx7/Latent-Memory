@@ -51,6 +51,6 @@ jobs:
 
           uv run python inference/run.py \
                 --style sequential_light \
-                --dataset mbppplus \
+                --dataset livecodebench \
                 --device cuda \
                 --num_recursive_rounds 1
