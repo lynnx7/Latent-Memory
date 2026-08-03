@@ -53,5 +53,5 @@ jobs:
                 --style sequential_scaled \
                 --dataset mbppplus \
                 --device cuda \
-                --num_recursive_rounds 1 \
+                --num_recursive_rounds 3 \
                 --num_samples 100
