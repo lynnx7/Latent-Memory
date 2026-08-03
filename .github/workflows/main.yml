@@ -6,7 +6,7 @@ on:
 jobs:
   run:
     runs-on: self-hosted
-
+    timeout-minutes: 1440 #>6hrs jobs
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -53,4 +53,5 @@ jobs:
                 --style sequential_scaled \
                 --dataset livecodebench \
                 --device cuda \
-                --num_recursive_rounds 1
+                --num_recursive_rounds 1 \
+                --num_samples 100
