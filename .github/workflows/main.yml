@@ -8,59 +8,59 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 1440 #>6hrs jobs
 
-    # GPU check
-    steps:
-
-      - name: Run EXP
-        working-directory: RecursiveMAS
-        run: |
-          nvidia-smi
-
-    # # RUN EXP
+    # GPU check ====================================
     # steps:
-    #   - name: Checkout
-    #     uses: actions/checkout@v4
-
-    #   - name: Install uv
-    #     uses: astral-sh/setup-uv@v5
-
-    #   # - name: Check uv
-    #   #   run: |
-    #   #     which uv
-    #   #     uv --version
-
-    #   # - name: Setup uv environment
-    #   #   working-directory: RecursiveMAS
-    #   #   run: |
-    #   #     export UV_CACHE_DIR="$HOME/.cache/uv"
-    #   #     uv lock
-    #   #     uv sync
-
-    #   - name: Setup uv environment
-    #     working-directory: RecursiveMAS
-    #     run: |
-    #       export UV_CACHE_DIR="$HOME/.cache/uv"
-    #       uv lock
-    #       uv sync --frozen
-
-    #   - name: Prepare data
-    #     run: |
-    #       export DATA_ROOT="$HOME/datasets/world-collapse"
-    #       export DATA_VERSION="${{ inputs.data_version }}"
-    #       export HF_HOME="$HOME/hf_cache"
-    #       export HF_DATASETS_CACHE="$HOME/hf_cache/datasets"
-    #       export TRANSFORMERS_CACHE="$HOME/hf_cache/transformers"
 
     #   - name: Run EXP
     #     working-directory: RecursiveMAS
     #     run: |
-    #       export DATA_ROOT="$HOME/datasets/world-collapse"
-    #       export HF_HOME="$HOME/hf_cache"
-    #       export HF_DATASETS_CACHE="$HOME/hf_cache/datasets"
-    #       export TRANSFORMERS_CACHE="$HOME/hf_cache/transformers"
+    #       nvidia-smi
 
-    #       uv run python inference/run.py \
-    #             --style sequential_scaled \
-    #             --dataset livecodebench \
-    #             --device cuda \
-    #             --num_recursive_rounds 3
+    # # RUN EXP =============================================
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # - name: Check uv
+      #   run: |
+      #     which uv
+      #     uv --version
+
+      # - name: Setup uv environment
+      #   working-directory: RecursiveMAS
+      #   run: |
+      #     export UV_CACHE_DIR="$HOME/.cache/uv"
+      #     uv lock
+      #     uv sync
+
+      - name: Setup uv environment
+        working-directory: RecursiveMAS
+        run: |
+          export UV_CACHE_DIR="$HOME/.cache/uv"
+          uv lock
+          uv sync --frozen
+
+      - name: Prepare data
+        run: |
+          export DATA_ROOT="$HOME/datasets/world-collapse"
+          export DATA_VERSION="${{ inputs.data_version }}"
+          export HF_HOME="$HOME/hf_cache"
+          export HF_DATASETS_CACHE="$HOME/hf_cache/datasets"
+          export TRANSFORMERS_CACHE="$HOME/hf_cache/transformers"
+
+      - name: Run EXP
+        working-directory: RecursiveMAS
+        run: |
+          export DATA_ROOT="$HOME/datasets/world-collapse"
+          export HF_HOME="$HOME/hf_cache"
+          export HF_DATASETS_CACHE="$HOME/hf_cache/datasets"
+          export TRANSFORMERS_CACHE="$HOME/hf_cache/transformers"
+
+          uv run python inference/run.py \
+                --style sequential_light \
+                --dataset livecodebench \
+                --device cuda \
+                --num_recursive_rounds 3
