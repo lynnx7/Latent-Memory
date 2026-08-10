@@ -17,7 +17,7 @@ import sys
 # Work around broken torchvision installs in text-only eval envs.
 _ORIG_FIND_SPEC = importlib.util.find_spec
 
-ENABLE_PLANNER_MEM = False
+ENABLE_PLANNER_MEM = True
 ENABLE_SOLVER_MEM = True
 
 def _patched_find_spec(name: str, *args, **kwargs):
