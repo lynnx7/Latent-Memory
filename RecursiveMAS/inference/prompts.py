@@ -20,6 +20,8 @@ DISTILL_FEEDBACK_SLOT = "<<DISTILL_FEEDBACK_SLOT>>"
 DELIBERATION_REFLECTOR_SLOT = "<<DELIBERATION_REFLECTOR_SLOT>>"
 DELIBERATION_FEEDBACK_SLOT = "<<DELIBERATION_FEEDBACK_SLOT>>"
 
+SYN_SLOT = "<<LATENT_SYN_SLOT>>"
+OLD_SYN_SLOT = "<<OLD_LATENT_SYN_SLOT>>"
 
 @dataclass(frozen=True)
 class MASPromptBundle:
@@ -27,6 +29,129 @@ class MASPromptBundle:
     refiner_user: str
     solver_user: str
 
+# 新增 
+# def build_synthesize_prompt_with_slot(question: str) -> str:
+#     return (
+#         f"You are a Memory Synthesis Agent in a multi-agent problem-solving process.\n"
+#         f"Below is the problem statement:\n{question}\n\n"
+#         f"The collective latent reasoning process from all agents is encoded here:\n"
+#         f"{SYNTHESIZE_SLOT}\n\n"
+#         f'''You are responsible for maintaining, refining, and optimizing the memory, which serves as a compact yet evolving repository
+#             of problem-solving strategies, reusable code snippets, and meta-reasoning techniques. Your goal is to enhance the model’s long-term
+#             performance by continuously updating the memory with high-value insights while filtering out redundant or trivial information.
+#             - The memory should include quick, accurate, reliable, and practical solutions to a range of technical and creative challenges.
+#             - After seeing each input, you should improve the content of the memory, synthesizing lessons, insights, tricks, and errors learned from
+#             past problems and adapting to new challenges.'''
+#     )
+
+#使用记忆
+# def build_code_planner_prompt_with_mem(question: str, task_type: str, fn_name: Optional[str] = None) -> str:
+#     interface = build_code_interface_prompt(task_type, fn_name=fn_name)
+#     return (
+#         "You are a planner agent in a multi-agent coding system.\n"
+#         f"{interface}\n"
+#         "The programming problem is:\n"
+#         f"{question}\n"
+#         "Memory from previous tasks:\n"
+#         f"{SYN_SLOT}\n"
+#         "Use the memory as a soft correction signal to improve the plan.\n"
+#         "If there is any conflict, prioritize the problem constraints.\n"
+#         "Provide a clear step-by-step plan (within 3-6 steps) to solve the problem.\n"
+#         "Do not write code.\n"
+#         "Your response should be in the format of:\n"
+#         "Step 1: ...\n"
+#         "...\n"
+#         "Step n: ..."
+        
+#     )
+# def build_code_planner_prompt_with_mem(question: str, task_type: str, fn_name: Optional[str] = None) -> str:
+#     interface = build_code_interface_prompt(task_type, fn_name=fn_name)
+#     return (
+#         "You are a planner agent in a recursive multi-agent coding system.\n"
+#         "This is a later recursive round.\n"
+#         f"{interface}\n"
+#         "The programming problem is:\n"
+#         f"{question}\n"
+#         "Feedback signal from the previous solver round:\n"
+#         f"{SYN_SLOT}\n"
+#         "Use the feedback as a soft correction signal to improve the plan.\n"
+#         "If there is any conflict, prioritize the problem constraints.\n"
+#         "Provide a clear step-by-step plan (within 3-6 steps) to solve the problem.\n"
+#         "Do not write code.\n"
+#         "Your response should be in the format of:\n"
+#         "Step 1: ...\n"
+#         "...\n"
+#         "Step n: ..."
+        
+#     )
+
+def build_code_planner_prompt_with_text_mem(question: str, past_q:str, past_plan:str, task_type: str, fn_name: Optional[str] = None) -> str:
+    interface = build_code_interface_prompt(task_type, fn_name=fn_name)
+    return (
+        "You are a planner agent in a recursive multi-agent coding system.\n"
+        f"{interface}\n"
+        "Relevant Previous Example:\n"
+        "Problem:\n"
+        f"{past_q}\n"
+        "\nPlan:\n"
+        f"{past_plan}\n"
+        "\nThe current programming problem is:\n"
+        f"{question}\n"
+        "Provide a clear step-by-step plan (within 3-6 steps) to solve the problem.\n"
+        "Do not write code.\n"
+        "Your response should be in the format of:\n"
+        "Step 1: ...\n"
+        "...\n"
+        "Step n: ..."
+        
+    )
+
+#备用
+# def build_synthesize_prompt_with_slot(question: str) -> str:
+#     return (
+#         f"You are a Memory Synthesis Agent in a multi-agent problem-solving process.\n"
+#         f"Below is the problem statement:\n{question}\n\n"
+#         f"The collective latent reasoning process from Refiner and Solver agents is encoded here:\n"
+#         f"{SYN_SLOT}\n\n"
+#         f"Based on this, summarize the key insights, and general strategies."
+#     )
+
+# def build_synthesize_prompt_with_slot(question: str) -> str:
+#     return (
+#         f"You are a Memory Synthesis Agent in a multi-agent problem-solving process.\n"
+#         f"Below is the problem statement:\n{question}\n\n"
+#         f"Summarize and analyse the difficulty and trait of this problem."
+#     )
+
+def build_synthesize_prompt_with_slot(question: str) -> str:
+    return (
+        f"You are a Memory Generator in a multi-agent system.\n"
+        f"Below is the problem statement:\n{question}\n\n"
+        f"The collective latent reasoning process from previous agents is encoded here:\n"
+        f"{SYN_SLOT}\n\n"
+        f"Summarize the updated key insights, and general strategies."
+        f"Do not write code.\n"
+        f"No need to give solution.\n"
+        f"Your response should be in the format of:\n"
+        f"<mem>"
+        f"..."
+        f"</mem>"
+
+        
+    )
+
+#之后更新记忆
+def build_updated_synthesize_prompt_with_slot(question: str) -> str:
+    return (
+        f"You are a Memory Generator in a multi-agent system.\n"
+        f"Below is the problem statement:\n{question}\n\n"
+        f"The collective latent reasoning process from previous agents is encoded here:\n"
+        f"{SYN_SLOT}\n\n"
+        f"Based on previous memory {OLD_SYN_SLOT}, summarize the updated key insights, and general strategies."
+        f"Do not write code.\n"
+        f"No need to give solution.\n"
+    )
+    
 
 def get_system_prompt(mas_design: str = "chain", mas_role: Optional[str] = None) -> str:
     role_name = str(mas_role or "").strip().lower()
@@ -412,6 +537,11 @@ def build_code_refiner_prompt(
     fn_name: Optional[str] = None,
 ) -> str:
     interface = build_code_interface_prompt(task_type, fn_name=fn_name)
+
+    # return (
+    #     f"What does this say: {planner_output}?"
+    # )
+    
     return (
         "You are a refiner agent in a multi-agent coding system.\n"
         f"{interface}\n"
@@ -435,6 +565,8 @@ def build_code_solver_prompt(
     task_type: str,
     args=None,
     fn_name: Optional[str] = None,
+    past_q: str = None,
+    past_ans: str = None,
 ) -> str:
     interface = build_code_interface_prompt(task_type, fn_name=fn_name)
     final_instruction = (
@@ -443,16 +575,37 @@ def build_code_solver_prompt(
     )
 
     if args is not None and int(getattr(args, "solver_pre_question", 0)) == 1:
-        return (
-            "You are a solver agent in a multi-agent coding system.\n"
-            f"{interface}\n"
-            "\n---\nThe programming problem is:\n"
-            f"{question}\n"
-            "Here is the refined plan:\n"
-            "Refined Plan:\n"
-            f"{refined_plan}\n"
-            f"{final_instruction}"
-        )
+        if past_q is None:
+            return (
+                "You are a solver agent in a multi-agent coding system.\n"
+                f"{interface}\n"
+                
+                "Relevant Previous Example:\n"
+                "Problem:\n"
+                f"{past_q}\n"
+                "\nSolution:\n"
+                f"{past_ans}\n"
+                "\n---\nThe current programming problem is:\n"
+                f"{question}\n"
+                "Here is the refined plan:\n"
+                "Refined Plan:\n"
+                f"{refined_plan}\n"
+                f"{final_instruction}"
+            )
+        else:
+            return (
+                "You are a solver agent in a multi-agent coding system.\n"
+                f"{interface}\n"
+                "\n---\nThe programming problem is:\n"
+                f"{question}\n"
+                "\n---\nThe programming problem is:\n"
+                f"{mem}\n"
+                
+                "Here is the refined plan:\n"
+                "Refined Plan:\n"
+                f"{refined_plan}\n"
+                f"{final_instruction}"
+            )
 
     return (
         "You are a solver agent in a multi-agent coding system.\n"
@@ -510,6 +663,8 @@ def build_code_solver_prompt_with_slots(
     args=None,
     mas_shape: str = "chain",
     fn_name: Optional[str] = None,
+    past_q: str = None,
+    past_ans: str = None,
 ) -> str:
     if mas_shape == "chain":
         return build_code_solver_prompt(
@@ -518,6 +673,8 @@ def build_code_solver_prompt_with_slots(
             task_type=task_type,
             args=args,
             fn_name=fn_name,
+            past_q=past_q,
+            past_ans=past_ans,
         )
     raise ValueError(f"Unsupported mas_shape: {mas_shape}")
 
