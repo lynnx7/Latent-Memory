@@ -17,8 +17,8 @@ import sys
 # Work around broken torchvision installs in text-only eval envs.
 _ORIG_FIND_SPEC = importlib.util.find_spec
 
-ENABLE_PLANNER_MEM = True
-ENABLE_SOLVER_MEM = True
+ENABLE_PLANNER_MEM = False
+ENABLE_SOLVER_MEM = False
 
 def _patched_find_spec(name: str, *args, **kwargs):
     if name == "torchvision" or name.startswith("torchvision."):
@@ -2461,7 +2461,8 @@ def run_solver_latent_stage(
     enable_thinking: bool,
     task_types: Optional[Sequence[str]] = None,
     fn_name: str = None,
-    mem_bank = None
+    mem_bank = None,
+    check_list=None
     
 ) -> List[str]:
     # model, tokenizer = load_agent_model_and_tokenizer(
@@ -2492,6 +2493,7 @@ def run_solver_latent_stage(
                     args=args,
                     mas_shape=args.mas_shape,
                     fn_name=fn_name,
+                    check_list=check_list
                 )
             else:
                 solver_mems = mem_bank.get("solver", [])
@@ -2503,7 +2505,8 @@ def run_solver_latent_stage(
                     print(f"The most similar solution is:", file=sys.stderr, flush=True)
                     print(f"{matched_ans}", file=sys.stderr, flush=True)
                     
-                user_prompt = build_code_solver_prompt_with_slots(question,task_types[idx], fn_name=fn_name,past_q=q, past_ans = matched_ans)
+                user_prompt = build_code_solver_prompt_with_slots(question,task_types[idx], fn_name=fn_name,past_q=q, past_ans = matched_ans,check_list=check_list)
+            print(f"{user_prompt}", file=sys.stderr, flush=True)
                 
         else:
             user_prompt = build_math_solver_prompt_with_slots(question, args, mas_shape=args.mas_shape)
@@ -3156,6 +3159,10 @@ def main() -> None:
     print("LOADED MAIN++++++++++++++++++++++++++++++++++++++++++++++++++++++++", file=sys.stderr, flush=True)
     print(args.method, file=sys.stderr, flush=True)
 
+
+   
+        
+    
     # 正常text 2 text测试
     # test_outputs = run_solver_text_stage(
     #     model_name_or_path=solver_model,
@@ -3605,6 +3612,36 @@ def main() -> None:
         agent1_inputs_for_log=[]
 
         syn_mem = None
+
+
+
+
+
+        def generate_text(prompt, model, tokenizer, device, gen_kwargs):
+            inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=False,
+            ).to(device)
+        
+            with torch.no_grad():
+                generated = model.generate(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                    **gen_kwargs,
+                )
+        
+            prompt_len = inputs["input_ids"].size(1)
+            gen_ids = generated[:, prompt_len:]
+        
+            return tokenizer.decode(
+                gen_ids[0],
+                skip_special_tokens=True,
+            ).strip()
+        
+
+        check_list = "Empty"
+            
         # 顺序执行而不是batch
         for q_idx, question in enumerate(questions):
             syn_mem = None
@@ -3666,7 +3703,7 @@ def main() -> None:
                         temperature=args.temperature,
                         top_p=args.top_p,
                     )
-
+                    print(f"Planner Complete", file=sys.stderr, flush=True)
                 else:
                     #跑feedback，这个是planner->refiner
                     if feedback_to_planner is None:
@@ -3710,7 +3747,7 @@ def main() -> None:
                     trust_remote_code=trust_remote_code,
                 )
 
-
+                print(f"Refinner Complete", file=sys.stderr, flush=True)
                 # refiner_to_solver = run_refiner_latent_stage_pri(
                 #     model = model_refiner,
                 #     tokenizer =  tokenizer_refiner,
@@ -3785,7 +3822,7 @@ def main() -> None:
                     feedback_to_planner_rounds.append(feedback_to_planner)                
     
             final_refiner_to_solver = refiner_to_solver_rounds[-1]
-    
+            print(f"Solver Complete", file=sys.stderr, flush=True)
             # 计算solver 然后拼接solver和synthesiszer 需要参考 run_solver_feedback_latent_stage
             # concat_output = run_synth_latent_stage(
             #     model = model_solver,
@@ -3869,7 +3906,8 @@ def main() -> None:
                 enable_thinking=enable_thinking,
                 task_types=task_types,
                 fn_name=fn_names[q_idx],
-                mem_bank=mem_bank
+                mem_bank=mem_bank,
+                check_list=check_list
             )
 
             
@@ -3963,6 +4001,97 @@ def main() -> None:
 
             # print("agent3_outputs:===============================================", file=sys.stderr, flush=True)
             # print(agent3_outputs, file=sys.stderr, flush=True)
+
+            # 先测试总结 checklist
+
+            ori_code=extract_code(agent3_outputs[q_idx])
+            if ori_code is not None:
+                r = extract_and_run_python(agent3_outputs[q_idx])
+                # print(r, file=sys.stderr, flush=True)
+            
+                if not r["success"]:
+                    # 识别错误
+                    user_prompt = (
+                        "For code:\n"
+                        + ori_code
+                        + "\nThe compiler gives error: "
+                        + r["error_type"]
+                        + ":"
+                        + r["error"]
+                        + "fixed and put the final code inside one markdown code block, "
+                          "for example ```python\\n<your solution code>\\n```"
+                    )
+                
+        
+                
+                    rendered_prompt = render_chat_prompt(
+                        tokenizer_solver,
+                        user_prompt,
+                        enable_thinking,
+                    )
+                
+                    gen_kwargs = build_generation_kwargs(
+                        tokenizer_solver,
+                        max_new_tokens=args.max_new_tokens,
+                        do_sample=args.do_sample,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                    )
+                
+                    output = generate_text(
+                        rendered_prompt,
+                        model_solver,
+                        tokenizer_solver,
+                        device,
+                        gen_kwargs,
+                    )
+                    agent3_outputs[q_idx] = output
+                    print(output, file=sys.stderr, flush=True)
+                    user_prompt = (
+                        "For code:\n"
+                        + ori_code
+                        + "\nThe compiler gives error: "
+                        + r["error_type"]
+                        + ":"
+                        + r["error"]
+                        + "\nThe previous check list is:\n " + check_list
+                        + "\nUpdate this error to the check list."
+                        + "\nDo not write code."
+                        + "\nYour response should be in the format of:"
+                        + "\n1. error type, why it happens and how to avoid."
+                        + "\n2. ..."
+                        + "\n..."
+                    )
+    
+                    rendered_prompt = render_chat_prompt(
+                        tokenizer_planner,
+                        user_prompt,
+                        enable_thinking,
+                    )
+                
+                    gen_kwargs = build_generation_kwargs(
+                        tokenizer_planner,
+                        max_new_tokens=args.max_new_tokens,
+                        do_sample=args.do_sample,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                    )
+                
+                    check_list = generate_text(
+                        rendered_prompt,
+                        model_planner,
+                        tokenizer_planner,
+                        device,
+                        gen_kwargs,
+                    )
+                    print("updated checklist:========", file=sys.stderr, flush=True)
+                    print(check_list, file=sys.stderr, flush=True)
+                else:
+                    print("No Error find", file=sys.stderr, flush=True)
+
+            
+            
+            
             # Recursive-specific logging fields (full chat template)
             a1_round1_prompts = [
                 build_planner_prompt_text(
@@ -4365,37 +4494,66 @@ def main() -> None:
 
     #只有最后执行
     # print("start eval", file=sys.stderr, flush=True)
-    
+    eval_rows_code: List[Dict[str, Any]] = []
     for rollout_idx, outputs in enumerate(agent3_outputs_by_rollout):
         correct_count = 0
         # print(len(outputs), file=sys.stderr, flush=True)
+
+
+        
         if is_code_eval:
             if sample_metadata is None:
                 raise RuntimeError("Missing LiveCodeBench metadata for code evaluation.")
-            eval_rows_code: List[Dict[str, Any]] = []
+
             eval_start_time = time.time()
             for i in range(total):
                 cleaned_output = clean_raw_output(outputs[i])
-                # print(cleaned_output,file=sys.stderr, flush=True)
+
+                
+                
                 parsed_code = extract_python_code(cleaned_output)
-                # print(parsed_code,file=sys.stderr, flush=True)
+
+
+
+                
                 eval_sample = sample_metadata[i].get("eval_sample", {})
+            
                 eval_result = evaluate_generated_code(
                     parsed_code,
                     eval_sample,
                     timeout_s=code_eval_timeout_s,
                 )
+            
                 is_correct = bool(eval_result.get("all_passed", False))
+            
                 if is_correct:
                     correct_count += 1
+            
                 eval_rows_code.append(
                     {
+                        # 问题
+                        "question": eval_sample.get(
+                            "question",
+                            eval_sample.get("prompt", "")
+                        ),
+            
+                        # agent 原始输出
+                        "agent_output": outputs[i],
+            
+                        # 清理后的代码
                         "parsed_code": parsed_code,
+            
+                        # 是否成功解析代码
                         "parse_ok": bool(parsed_code),
+            
+                        # 是否通过测试
                         "correct": is_correct,
+            
+                        # 详细测试结果
                         "eval": eval_result,
                     }
                 )
+            
                 if ((i + 1) % 10 == 0) or (i + 1 == total):
                     elapsed = time.time() - eval_start_time
                     print(
@@ -4403,7 +4561,11 @@ def main() -> None:
                         f"checked {i + 1}/{total} samples, correct={correct_count}, "
                         f"elapsed={elapsed:.1f}s"
                     )
+            
+            
             rollout_eval_code.append(eval_rows_code)
+            
+        
         else:
             eval_rows_math: List[Tuple[str, Optional[str], bool, str, str]] = []
             for i in range(total):
@@ -4425,6 +4587,20 @@ def main() -> None:
                 f"accuracy={rollout_acc:.2f}% ({correct_count}/{total})"
             )
 
+    # 保存 JSON
+    save_path = f"code_eval_rollout_{rollout_idx}.json"
+    
+    with open(save_path, "w", encoding="utf-8") as f:
+        json.dump(
+            eval_rows_code,
+            f,
+            indent=2,
+            ensure_ascii=False
+        )
+    
+    print(f"Saved evaluation results to {save_path}")
+
+    
     pass_correct_total = 0
     for i in range(total):
         if is_code_eval:
@@ -4650,6 +4826,68 @@ def main() -> None:
             f.write(json.dumps(summary_record, ensure_ascii=False) + "\n")
         print(f"[jsonl] wrote {len(sample_records)} sample records to {result_jsonl_path}")
 
+
+def extract_code(agent_output: str) -> str:
+    """从 Agent 输出中提取第一个 Python 代码块"""
+    match = re.search(
+        r"```(?:python|py)?\s*\n?(.*?)```",
+        agent_output,
+        re.DOTALL | re.IGNORECASE
+    )
+
+    if not match:
+        return None
+
+    return match.group(1).strip()
+    
+def extract_and_run_python(agent_output: str):
+    """
+    从 Agent 输出中提取 Markdown Python 代码块并执行。
+
+    Returns:
+        {
+            "code": 提取出的代码,
+            "success": 是否执行成功,
+            "error_type": 错误类型（成功时为 None）,
+            "error": 错误信息（成功时为 None）
+        }
+    """
+
+    # 1. 提取 ```python ... ``` 代码块
+    match = re.search(
+        r"```(?:python|py)?\s*\n?(.*?)```",
+        agent_output,
+        re.DOTALL | re.IGNORECASE
+    )
+
+    if not match:
+        return {
+            "code": None,
+            "success": False,
+            "error_type": "CodeNotFound",
+            "error": "没有找到 Python 代码块"
+        }
+
+    code = match.group(1).strip()
+
+    # 2. 尝试执行
+    try:
+        exec(code, {"__builtins__": __builtins__})
+
+        return {
+            "code": code,
+            "success": True,
+            "error_type": None,
+            "error": None
+        }
+
+    except Exception as e:
+        return {
+            "code": code,
+            "success": False,
+            "error_type": type(e).__name__,
+            "error": str(e)
+        }
 
 
 if __name__ == "__main__":

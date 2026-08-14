@@ -567,15 +567,17 @@ def build_code_solver_prompt(
     fn_name: Optional[str] = None,
     past_q: str = None,
     past_ans: str = None,
+    check_list:str=None
 ) -> str:
     interface = build_code_interface_prompt(task_type, fn_name=fn_name)
     final_instruction = (
         "Solve the problem and put the final code inside one markdown code block, "
         "for example ```python\\n<your solution code>\\n```."
-    )
 
+    )
+    # "\nDon't make the following error :\n"+check_list
     if args is not None and int(getattr(args, "solver_pre_question", 0)) == 1:
-        if past_q is None:
+        if past_q is not None:
             return (
                 "You are a solver agent in a multi-agent coding system.\n"
                 f"{interface}\n"
@@ -598,9 +600,6 @@ def build_code_solver_prompt(
                 f"{interface}\n"
                 "\n---\nThe programming problem is:\n"
                 f"{question}\n"
-                "\n---\nThe programming problem is:\n"
-                f"{mem}\n"
-                
                 "Here is the refined plan:\n"
                 "Refined Plan:\n"
                 f"{refined_plan}\n"
@@ -665,6 +664,7 @@ def build_code_solver_prompt_with_slots(
     fn_name: Optional[str] = None,
     past_q: str = None,
     past_ans: str = None,
+    check_list:str="empty"
 ) -> str:
     if mas_shape == "chain":
         return build_code_solver_prompt(
@@ -675,6 +675,7 @@ def build_code_solver_prompt_with_slots(
             fn_name=fn_name,
             past_q=past_q,
             past_ans=past_ans,
+            check_list=check_list
         )
     raise ValueError(f"Unsupported mas_shape: {mas_shape}")
 
