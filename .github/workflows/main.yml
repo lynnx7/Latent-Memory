@@ -60,7 +60,7 @@ jobs:
           export TRANSFORMERS_CACHE="$HOME/hf_cache/transformers"
 
           uv run python inference/run.py \
-                --style sequential_light \
-                --dataset mbppplus \
+                --style mixture \
+                --dataset livecodebench \
                 --device cuda \
                 --num_recursive_rounds 1
