@@ -283,11 +283,11 @@ def load_eval_questions_and_answers(
             cache_dir=(mbppplus_cache_dir or None),
         )
         # print(records, file=sys.stderr, flush=True)
-        keywords = ["list"]
-        records = [
-            obj for obj in records
-            if any(k.lower() in obj.get("prompt", "").lower() for k in keywords)
-        ]
+        # keywords = ["list"]
+        # records = [
+        #     obj for obj in records
+        #     if any(k.lower() in obj.get("prompt", "").lower() for k in keywords)
+        # ]
         if len(records) == 0:
             raise ValueError("Loaded MBPP+ records are empty.")
 
