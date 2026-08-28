@@ -2506,7 +2506,7 @@ def run_solver_latent_stage(
                     print(f"{matched_ans}", file=sys.stderr, flush=True)
                     
                 user_prompt = build_code_solver_prompt_with_slots(question,task_types[idx], fn_name=fn_name,past_q=q, past_ans = matched_ans,check_list=check_list)
-            print(f"{user_prompt}", file=sys.stderr, flush=True)
+            # print(f"{user_prompt}", file=sys.stderr, flush=True)
                 
         else:
             user_prompt = build_math_solver_prompt_with_slots(question, args, mas_shape=args.mas_shape)
@@ -2973,7 +2973,7 @@ def main() -> None:
         mbppplus_cache_dir=args.mbppplus_cache_dir,
         mbppplus_num_prompt_tests=int(args.mbppplus_num_prompt_tests),
     )
-
+    print(questions[0], file=sys.stderr, flush=True)
     is_code_eval = is_code_eval_dataset(dataset_name)
     code_eval_timeout_s = int(args.mbppplus_timeout_s) if is_mbppplus_dataset(dataset_name) else int(args.lcb_timeout_s)
     task_types: Optional[List[str]] = None
@@ -4004,90 +4004,92 @@ def main() -> None:
 
             # 先测试总结 checklist
 
-            ori_code=extract_code(agent3_outputs[q_idx])
-            if ori_code is not None:
-                r = extract_and_run_python(agent3_outputs[q_idx])
-                # print(r, file=sys.stderr, flush=True)
+            # ori_code=extract_code(agent3_outputs[q_idx])
+            # if ori_code is not None:
+            #     r = extract_and_run_python(agent3_outputs[q_idx])
+            #     # print(r, file=sys.stderr, flush=True)
             
-                if not r["success"]:
-                    # 识别错误
-                    user_prompt = (
-                        "For code:\n"
-                        + ori_code
-                        + "\nThe compiler gives error: "
-                        + r["error_type"]
-                        + ":"
-                        + r["error"]
-                        + "fixed and put the final code inside one markdown code block, "
-                          "for example ```python\\n<your solution code>\\n```"
-                    )
+            #     if not r["success"]:
+            #         # 识别错误
+            #         user_prompt = (
+            #             "For code:\n"
+            #             + ori_code
+            #             + "\nThe compiler gives error: "
+            #             + r["error_type"]
+            #             + ":"
+            #             + r["error"]
+            #             + "fixed and put the final code inside one markdown code block, "
+            #               "for example ```python\\n<your solution code>\\n```"
+            #         )
                 
         
                 
-                    rendered_prompt = render_chat_prompt(
-                        tokenizer_solver,
-                        user_prompt,
-                        enable_thinking,
-                    )
+            #         rendered_prompt = render_chat_prompt(
+            #             tokenizer_solver,
+            #             user_prompt,
+            #             enable_thinking,
+            #         )
                 
-                    gen_kwargs = build_generation_kwargs(
-                        tokenizer_solver,
-                        max_new_tokens=args.max_new_tokens,
-                        do_sample=args.do_sample,
-                        temperature=args.temperature,
-                        top_p=args.top_p,
-                    )
+            #         gen_kwargs = build_generation_kwargs(
+            #             tokenizer_solver,
+            #             max_new_tokens=args.max_new_tokens,
+            #             do_sample=args.do_sample,
+            #             temperature=args.temperature,
+            #             top_p=args.top_p,
+            #         )
                 
-                    output = generate_text(
-                        rendered_prompt,
-                        model_solver,
-                        tokenizer_solver,
-                        device,
-                        gen_kwargs,
-                    )
-                    agent3_outputs[q_idx] = output
-                    print(output, file=sys.stderr, flush=True)
-                    user_prompt = (
-                        "For code:\n"
-                        + ori_code
-                        + "\nThe compiler gives error: "
-                        + r["error_type"]
-                        + ":"
-                        + r["error"]
-                        + "\nThe previous check list is:\n " + check_list
-                        + "\nUpdate this error to the check list."
-                        + "\nDo not write code."
-                        + "\nYour response should be in the format of:"
-                        + "\n1. error type, why it happens and how to avoid."
-                        + "\n2. ..."
-                        + "\n..."
-                    )
+            #         output = generate_text(
+            #             rendered_prompt,
+            #             model_solver,
+            #             tokenizer_solver,
+            #             device,
+            #             gen_kwargs,
+            #         )
+            #         agent3_outputs[q_idx] = output
+            #         # print(output, file=sys.stderr, flush=True)
+            #         # user_prompt = (
+            #         #     "For code:\n"
+            #         #     + ori_code
+            #         #     + "\nThe compiler gives error: "
+            #         #     + r["error_type"]
+            #         #     + ":"
+            #         #     + r["error"]
+            #         #     + "\nThe previous check list is:\n " + check_list
+            #         #     + "\nUpdate this error to the check list."
+            #         #     + "\nDo not write code."
+            #         #     + "\nYour response should be in the format of:"
+            #         #     + "\n1. error type, why it happens and how to avoid."
+            #         #     + "\n2. ..."
+            #         #     + "\n..."
+            #         # )
     
-                    rendered_prompt = render_chat_prompt(
-                        tokenizer_planner,
-                        user_prompt,
-                        enable_thinking,
-                    )
+            #         # rendered_prompt = render_chat_prompt(
+            #         #     tokenizer_planner,
+            #         #     user_prompt,
+            #         #     enable_thinking,
+            #         # )
                 
-                    gen_kwargs = build_generation_kwargs(
-                        tokenizer_planner,
-                        max_new_tokens=args.max_new_tokens,
-                        do_sample=args.do_sample,
-                        temperature=args.temperature,
-                        top_p=args.top_p,
-                    )
+            #         # gen_kwargs = build_generation_kwargs(
+            #         #     tokenizer_planner,
+            #         #     max_new_tokens=args.max_new_tokens,
+            #         #     do_sample=args.do_sample,
+            #         #     temperature=args.temperature,
+            #         #     top_p=args.top_p,
+            #         # )
                 
-                    check_list = generate_text(
-                        rendered_prompt,
-                        model_planner,
-                        tokenizer_planner,
-                        device,
-                        gen_kwargs,
-                    )
-                    print("updated checklist:========", file=sys.stderr, flush=True)
-                    print(check_list, file=sys.stderr, flush=True)
-                else:
-                    print("No Error find", file=sys.stderr, flush=True)
+            #         # check_list = generate_text(
+            #         #     rendered_prompt,
+            #         #     model_planner,
+            #         #     tokenizer_planner,
+            #         #     device,
+            #         #     gen_kwargs,
+            #         # )
+                    
+            #         # print("updated checklist:========", file=sys.stderr, flush=True)
+            #         # print(check_list, file=sys.stderr, flush=True)
+            #         print("Error find !!!!!!!!!!!!!!!!!!!!!!!!!!!!!", file=sys.stderr, flush=True)
+            #     else:
+            #         print("No Error find ------------------------------", file=sys.stderr, flush=True)
 
             
             
@@ -4517,7 +4519,8 @@ def main() -> None:
 
                 
                 eval_sample = sample_metadata[i].get("eval_sample", {})
-            
+                # print("eval sample", file=sys.stderr, flush=True)  
+                # print(eval_sample, file=sys.stderr, flush=True)
                 eval_result = evaluate_generated_code(
                     parsed_code,
                     eval_sample,
@@ -4532,10 +4535,7 @@ def main() -> None:
                 eval_rows_code.append(
                     {
                         # 问题
-                        "question": eval_sample.get(
-                            "question",
-                            eval_sample.get("prompt", "")
-                        ),
+                        "question": questions[i],
             
                         # agent 原始输出
                         "agent_output": outputs[i],
