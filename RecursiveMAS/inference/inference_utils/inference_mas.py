@@ -11,14 +11,10 @@ import random
 import re
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-import torch.nn.functional as F
-#新增
-import sys
+
 # Work around broken torchvision installs in text-only eval envs.
 _ORIG_FIND_SPEC = importlib.util.find_spec
 
-ENABLE_PLANNER_MEM = False
-ENABLE_SOLVER_MEM = False
 
 def _patched_find_spec(name: str, *args, **kwargs):
     if name == "torchvision" or name.startswith("torchvision."):
@@ -56,7 +52,6 @@ from prompts import (
     SYSTEM_PROMPT,
     build_code_planner_prompt,
     build_code_planner_prompt_with_feedback_slot,
-    build_code_planner_prompt_with_text_mem,
     build_code_refiner_prompt,
     build_code_refiner_prompt_with_slot,
     build_code_solver_prompt,
@@ -67,10 +62,6 @@ from prompts import (
     build_math_refiner_prompt_with_slot,
     build_math_solver_prompt,
     build_math_solver_prompt_with_slots,
-    build_synthesize_prompt_with_slot,
-    build_updated_synthesize_prompt_with_slot,
-    SYN_SLOT,
-    OLD_SYN_SLOT,
 )
 from .lcb_utils import (
     build_code_reparse_suffix,
@@ -282,12 +273,6 @@ def load_eval_questions_and_answers(
             subset=(mbppplus_subset or None),
             cache_dir=(mbppplus_cache_dir or None),
         )
-        # print(records, file=sys.stderr, flush=True)
-        # keywords = ["list"]
-        # records = [
-        #     obj for obj in records
-        #     if any(k.lower() in obj.get("prompt", "").lower() for k in keywords)
-        # ]
         if len(records) == 0:
             raise ValueError("Loaded MBPP+ records are empty.")
 
@@ -1023,7 +1008,7 @@ def autoregressive_latent_rollout(
 
     return torch.cat(hidden_states, dim=1)
 
-#  纯输出text，和latent最后变text没关系
+
 def run_text_generation_stage(
     stage_name: str,
     model_name_or_path: str,
@@ -1084,330 +1069,62 @@ def run_text_generation_stage(
     release_resources(model, tokenizer)
     return outputs, rendered_prompts
 
-def run_text_generation_stage_mine(
-    model,tokenizer,
-    user_prompts: Sequence[str],
-    batch_size: int,
-    max_new_tokens: int,
-    do_sample: bool,
-    temperature: float,
-    top_p: float,
-    device: torch.device,
-    dtype: torch.dtype,
-    trust_remote_code: bool,
-    enable_thinking: bool,
-) -> Tuple[List[str], List[str]]:
 
-    
-    rendered_prompts = [render_chat_prompt(tokenizer, p, enable_thinking) for p in user_prompts]
-    gen_kwargs = build_generation_kwargs(
-        tokenizer,
-        max_new_tokens=max_new_tokens,
-        do_sample=do_sample,
-        temperature=temperature,
-        top_p=top_p,
-    )
-
-    outputs: List[str] = []
-    total_batches = (len(rendered_prompts) + batch_size - 1) // batch_size
-    for start, end in tqdm(
-        batch_iter_indices(len(rendered_prompts), batch_size),
-        total=total_batches,
-        desc=f"test text",
-    ):
-        batch_prompts = rendered_prompts[start:end]
-        batch_inputs = tokenizer(
-            batch_prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=False,
-        ).to(device)
-
-        with torch.no_grad():
-            generated = model.generate(
-                input_ids=batch_inputs["input_ids"],
-                attention_mask=batch_inputs["attention_mask"],
-                **gen_kwargs,
-            )
-
-        prompt_len = batch_inputs["input_ids"].size(1)
-        gen_ids = generated[:, prompt_len:]
-        batch_texts = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-        outputs.extend([text.strip() for text in batch_texts])
-
-    return outputs
-
-def run_solver_text_stage(
+def run_planner_latent_stage(
     model_name_or_path: str,
     questions: Sequence[str],
-    args: argparse.Namespace,
-    batch_size: int,
-    max_new_tokens: int,
-    do_sample: bool,
-    temperature: float,
-    top_p: float,
-    device: torch.device,
-    dtype: torch.dtype,
-    trust_remote_code: bool,
-    enable_thinking: bool,
-    task_types: Optional[Sequence[str]] = None,
-    fn_names: Optional[Sequence[Optional[str]]] = None,
-) -> List[str]:
-    # 1. 加载模型与 Tokenizer
-    model, tokenizer = load_agent_model_and_tokenizer(
-        model_name_or_path=model_name_or_path,
-        device=device,
-        dtype=dtype,
-        trust_remote_code=trust_remote_code,
-        agent_name="solver",
-    )
-
-    # 2. 构造完整的文本 Prompts
-    prompts: List[str] = ["tell me 3+3=?"]
-
-    # 3. 构造生成参数
-    gen_kwargs = build_generation_kwargs(
-        tokenizer,
-        max_new_tokens=max_new_tokens,
-        do_sample=do_sample,
-        temperature=temperature,
-        top_p=top_p,
-    )
-
-    outputs: List[str] = []
-    total_batches = (len(questions) + batch_size - 1) // batch_size
-
-    # 4. 标准的 Text-to-Text 批处理生成
-    for start, end in tqdm(
-        batch_iter_indices(len(questions), batch_size),
-        total=total_batches,
-        desc="solver text-from-text",
-    ):
-        batch_prompts = prompts[start:end]
-
-        # Tokenize 输入文本并做 Left Padding (适合 Decoder-only 模型)
-        inputs = tokenizer(
-            batch_prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=False,
-        ).to(device)
-
-        input_ids = inputs["input_ids"]
-        attention_mask = inputs["attention_mask"]
-        prompt_len = input_ids.size(1)
-
-        with torch.no_grad():
-            generated = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                **gen_kwargs,
-            )
-
-        sequences = generated.sequences if hasattr(generated, "sequences") else generated
-        
-        # 裁剪掉 Prompt 部分的 Token，只保留新生成的回答 Token
-        if sequences.size(1) > prompt_len:
-            gen_ids = sequences[:, prompt_len:]
-        else:
-            gen_ids = sequences
-
-        batch_texts = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-        outputs.extend([text.strip() for text in batch_texts])
-
-    release_resources(model, tokenizer)
-    return outputs
-
-#这个可能要测试下
-# def run_planner_latent_stage(
-#     model,tokenizer,inner_1,outer_12,embed_layer,planner_embed_dtype,
-#     syn_mem:None,
-#     questions: Sequence[str],
-#     latent_steps: int,
-#     batch_size: int,
-#     device: torch.device,
-#     trust_remote_code: bool,
-#     enable_thinking: bool,
-#     task_types: Optional[Sequence[str]] = None,
-#     fn_names: Optional[Sequence[Optional[str]]] = None
-# ) -> List[torch.Tensor]:
-#     if latent_steps == 0:
-#         out_dim = infer_outer_adapter_out_dim_from_file(outer_12_path)
-#         return [torch.empty((0, out_dim), dtype=torch.float32) for _ in questions]
-
-#     prompt_ids = []
-#     prompt_segments = []
-#     for idx, question in enumerate(questions):
-#         if task_types is not None:
-#             fn_name = fn_names[idx] if fn_names is not None else None
-#             #先写code版本的
-#             if syn_mem is not None:
-#                 user_prompt = build_code_planner_prompt_with_mem(question, task_types[idx], fn_name=fn_name)
-#             else:
-#                 user_prompt = build_code_planner_prompt(question, task_types[idx], fn_name=fn_name)
-#         else:
-#             user_prompt = build_math_planner_prompt(question)
-
-#         if syn_mem is not None:
-#             prompt_segments.append(
-#                 split_prompt_ids_by_slots(
-#                     tokenizer,
-#                     user_prompt,
-#                     [SYN_SLOT], #光构造prompt不够，后面还要插入！
-#                     enable_thinking,
-#                 )
-#             )
-#         else:
-            
-#             prompt_ids.append(render_chat_prompt_ids(tokenizer, user_prompt, enable_thinking))
-
-#     planner_to_refiner: List[torch.Tensor] = []
-#     total_batches = (len(prompt_ids) + batch_size - 1) // batch_size
-    
-#     if syn_mem is None: 
-
-#         for start, end in tqdm(
-#             batch_iter_indices(len(prompt_ids), batch_size),
-#             total=total_batches,
-#             desc="planner latent (no mem)",
-#         ):
-            
-#             batch_ids = prompt_ids[start:end]
-#             input_ids, attention_mask = pad_left_ids(
-#                 batch_ids,
-#                 pad_id=tokenizer.pad_token_id,
-#                 device=device,
-#             )
-#             input_embeds = embed_layer(input_ids)
-            
-#             hidden_rollout = autoregressive_latent_rollout(
-#                 model=model,
-#                 rollout_inner_adapter=inner_1,
-#                 input_embeds=input_embeds, # 最后需要这个
-#                 attention_mask=attention_mask, # 最后需要这个
-#                 latent_steps=latent_steps,
-#             )
-#             planner_self = run_inner_adapter(inner_1, hidden_rollout, output_dtype=planner_embed_dtype)
-#             lat12 = run_outer_adapter(outer_12, planner_self, output_dtype=planner_embed_dtype)
-    
-#             for i in range(lat12.size(0)):
-#                 planner_to_refiner.append(lat12[i].detach().cpu())
-
-#     else:
-
-#         for start, end in tqdm(
-#             batch_iter_indices(len(questions), batch_size),
-#             total=total_batches,
-#             desc="planner latent (+ mem)",
-#         ):
-#             embed_seqs: List[torch.Tensor] = []
-#             for idx in range(start, end):
-#                 seg_prefix, seg_suffix = prompt_segments[idx]
-#                 prefix_embeds = token_ids_to_embeds(
-#                     embed_layer,
-#                     seg_prefix,
-#                     device=device,
-#                     dtype=planner_embed_dtype,
-#                 )
-#                 suffix_embeds = token_ids_to_embeds(
-#                     embed_layer,
-#                     seg_suffix,
-#                     device=device,
-#                     dtype=planner_embed_dtype,
-#                 )
-#                 feedback_embed = syn_mem[idx].to(device=device, dtype=planner_embed_dtype)
-#                 seq = torch.cat([prefix_embeds, feedback_embed, suffix_embeds], dim=0)
-#                 embed_seqs.append(seq)
-
-#             batch_embeds, attention_mask = pad_left_embeds(embed_seqs, device=device)
-#             hidden_rollout = autoregressive_latent_rollout(
-#                 model=model,
-#                 rollout_inner_adapter=inner_1,
-#                 input_embeds=batch_embeds,
-#                 attention_mask=attention_mask,
-#                 latent_steps=latent_steps,
-#             )
-#             planner_self = run_inner_adapter(inner_1, hidden_rollout, output_dtype=planner_embed_dtype)
-#             lat12 = run_outer_adapter(outer_12, planner_self, output_dtype=planner_embed_dtype)
-#             for i in range(lat12.size(0)):
-#                 planner_to_refiner.append(lat12[i].detach().cpu())
-
-
-        
-    
-#     # release_resources(model, tokenizer, inner_1, outer_12)
-#     return planner_to_refiner
-
-def get_question_embedding(text: str, tokenizer, embed_layer, device: torch.device) -> torch.Tensor:
-    """计算单个问题的文本 Embedding 向量 (Mean Pooling + L2 Normalization)"""
-    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(device)
-    with torch.no_grad():
-        embeds = embed_layer(inputs.input_ids)  # (1, seq_len, hidden_dim)
-        mask = inputs.attention_mask.unsqueeze(-1)
-        mean_embed = (embeds * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
-        return F.normalize(mean_embed, p=2, dim=-1)  # (1, hidden_dim)
-
-def retrieve_most_similar_ans(q_emb: torch.Tensor, mem_bank: dict,target:str) -> Optional[str]:
-    """计算余弦相似度并返回匹配度最高的 ans"""
-    planner_mems = mem_bank.get(target, [])
-    if not planner_mems:
-        return None
-    
-    # 拼接已存入的所有 question embeddings
-    stored_embs = torch.cat([m["embedding"].to(q_emb.device) for m in planner_mems], dim=0) # (N, hidden_dim)
-    
-    # 余弦相似度计算 (1, hidden_dim) @ (hidden_dim, N) -> (1, N)
-    similarities = torch.matmul(q_emb, stored_embs.T).squeeze(0)
-    best_idx = torch.argmax(similarities).item()
-    
-    return planner_mems[best_idx]["question"], planner_mems[best_idx]["ans"]
-
-def run_planner_latent_stage_pri(
-    model,tokenizer,inner_1,outer_12,embed_layer,planner_embed_dtype,
-    syn_mem:None,
-    questions: Sequence[str],
+    agent1_inner_aligner_path: str,
+    outer_12_path: str,
+    outer_12_type: str,
     latent_steps: int,
     batch_size: int,
     device: torch.device,
+    model_dtype: torch.dtype,
+    outer_dtype: torch.dtype,
     trust_remote_code: bool,
+    inner_adapter_type_fallback: str,
     enable_thinking: bool,
-
- # 👇 新增文本生成相关参数
-    max_new_tokens: int,
-    do_sample: bool,
-    temperature: float,
-    top_p: float,
     task_types: Optional[Sequence[str]] = None,
-    fn_name: str = None,
-    mem_bank=None,
-
-
-
+    fn_names: Optional[Sequence[Optional[str]]] = None,
 ) -> List[torch.Tensor]:
-    
     if latent_steps == 0:
         out_dim = infer_outer_adapter_out_dim_from_file(outer_12_path)
         return [torch.empty((0, out_dim), dtype=torch.float32) for _ in questions]
 
+    model, tokenizer = load_agent_model_and_tokenizer(
+        model_name_or_path=model_name_or_path,
+        device=device,
+        dtype=model_dtype,
+        trust_remote_code=trust_remote_code,
+        agent_name="planner",
+    )
+    embed_layer = model.get_input_embeddings()
+    planner_embed_dtype = embed_layer.weight.dtype
+    planner_hidden = embed_layer.weight.size(-1)
+
+    inner_1 = load_inner_adapter_module(
+        adapter_path=agent1_inner_aligner_path,
+        hidden_size=planner_hidden,
+        device=device,
+        dtype=model_dtype,
+        fallback_adapter_type=inner_adapter_type_fallback,
+    )
+
+    probe_out_dim = infer_outer_adapter_out_dim_from_file(outer_12_path)
+    outer_12 = load_outer_adapter_module(
+        adapter_path=outer_12_path,
+        in_dim=planner_hidden,
+        out_dim=probe_out_dim,
+        adapter_type=outer_12_type,
+        device=device,
+        dtype=outer_dtype,
+    )
+
     prompt_ids = []
     for idx, question in enumerate(questions):
         if task_types is not None:
-            # fn_name = fn_names[idx] if fn_names is not None else None
-            # if True:
-            if mem_bank["planner"] == [] or not ENABLE_PLANNER_MEM:
-                user_prompt = build_code_planner_prompt(question, task_types[idx], fn_name=fn_name)
-                # print(f"{user_prompt}", file=sys.stderr, flush=True)
-            else:
-                planner_mems = mem_bank.get("planner", [])
-                if len(planner_mems) > 0:
-                    q_emb = get_question_embedding(question, tokenizer, embed_layer, device)
-                    q, matched_ans = retrieve_most_similar_ans(q_emb, mem_bank,"planner")
-                    # print(f"The question is", file=sys.stderr, flush=True)
-                    # print(f"{question}", file=sys.stderr, flush=True)
-                    print(f"The most similar plan is:", file=sys.stderr, flush=True)
-                    print(f"{matched_ans}", file=sys.stderr, flush=True)
-                    
-                user_prompt = build_code_planner_prompt_with_text_mem(question,q, matched_ans, task_types[idx], fn_name=fn_name)
+            fn_name = fn_names[idx] if fn_names is not None else None
+            user_prompt = build_code_planner_prompt(question, task_types[idx], fn_name=fn_name)
         else:
             user_prompt = build_math_planner_prompt(question)
         prompt_ids.append(render_chat_prompt_ids(tokenizer, user_prompt, enable_thinking))
@@ -1440,323 +1157,71 @@ def run_planner_latent_stage_pri(
         for i in range(lat12.size(0)):
             planner_to_refiner.append(lat12[i].detach().cpu())
 
-    # 生成private text plann思路数据
-    if ENABLE_PLANNER_MEM:
-        gen_kwargs = build_generation_kwargs(
-            tokenizer,
-            max_new_tokens=max_new_tokens,
-            do_sample=do_sample,
-            temperature=temperature,
-            top_p=top_p,
-        )
-        
-        with torch.no_grad():
-            generated = model.generate(
-                inputs_embeds=input_embeds,
-                attention_mask=attention_mask,
-                **gen_kwargs,
-            )
-    
-        sequences = generated.sequences if hasattr(generated, "sequences") else generated
-        prompt_len = attention_mask.size(1)
-        
-        if sequences.size(1) > max_new_tokens:
-            gen_ids = sequences[:, prompt_len:]
-        else:
-            gen_ids = sequences
-            
-        batch_texts = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-        outputs = [text.strip() for text in batch_texts]
-        outputs.extend([text.strip() for text in batch_texts])
-    
-        mem_bank["planner"].append({"question":question,"ans":outputs[0],
-                        "embedding": get_question_embedding(question, tokenizer, embed_layer, device)})  # 转到 CPU 释放显存})
-    
-    #release_resources(model, tokenizer, inner_1, outer_12)
+    release_resources(model, tokenizer, inner_1, outer_12)
     return planner_to_refiner
 
-def run_refiner_latent_stage_pri(
-    model,tokenizer,inner_2,outer_23,embed_layer,refiner_embed_dtype,
-    planner_latents: Sequence[torch.Tensor],
-    questions: Sequence[str],
-    latent_steps: int,
-    batch_size: int,
-    device: torch.device,
-    trust_remote_code: bool,
-    enable_thinking: bool,
-
- # 👇 新增文本生成相关参数
-    max_new_tokens: int,
-    do_sample: bool,
-    temperature: float,
-    top_p: float,
-    task_types: Optional[Sequence[str]] = None,
-    fn_names: Optional[Sequence[Optional[str]]] = None,
-    mem_bank=None,
-
-    
-) -> List[torch.Tensor]:
-    if latent_steps == 0:
-        out_dim = infer_outer_adapter_out_dim_from_file(outer_23_path)
-        return [torch.empty((0, out_dim), dtype=torch.float32) for _ in questions]
-
-    prompt_segments = []
-    for idx, question in enumerate(questions):
-        if task_types is not None:
-            fn_name = fn_names[idx] if fn_names is not None else None
-            user_prompt = build_code_refiner_prompt_with_slot(
-                question,
-                task_types[idx],
-                fn_name=fn_name,
-            )
-        else:
-            user_prompt = build_math_refiner_prompt_with_slot(question)
-        prompt_segments.append(
-            split_prompt_ids_by_slots(
-                tokenizer,
-                user_prompt,
-                [PLANNER_SLOT],
-                enable_thinking,
-            )
-        )
-
-    refiner_to_solver: List[torch.Tensor] = []
-    total_batches = (len(questions) + batch_size - 1) // batch_size
-    outputs: List[str] = []
-    for start, end in tqdm(
-        batch_iter_indices(len(questions), batch_size),
-        total=total_batches,
-        desc="refiner latent",
-    ):
-        embed_seqs: List[torch.Tensor] = []
-        for idx in range(start, end):
-            seg_prefix, seg_suffix = prompt_segments[idx]
-            prefix_embeds = token_ids_to_embeds(
-                embed_layer,
-                seg_prefix,
-                device=device,
-                dtype=refiner_embed_dtype,
-            )
-            suffix_embeds = token_ids_to_embeds(
-                embed_layer,
-                seg_suffix,
-                device=device,
-                dtype=refiner_embed_dtype,
-            )
-            planner_embed = planner_latents[idx].to(device=device, dtype=refiner_embed_dtype)
-            seq = torch.cat([prefix_embeds,planner_embed,suffix_embeds], dim=0)
-            embed_seqs.append(seq)
-
-        batch_embeds, attention_mask = pad_left_embeds(embed_seqs, device=device)
-        hidden_rollout = autoregressive_latent_rollout(
-            model=model,
-            rollout_inner_adapter=inner_2,
-            input_embeds=batch_embeds,
-            attention_mask=attention_mask,
-            latent_steps=latent_steps,
-        )
-        refiner_self = run_inner_adapter(inner_2, hidden_rollout, output_dtype=refiner_embed_dtype)
-        mapped = run_outer_adapter(outer_23, refiner_self, output_dtype=refiner_embed_dtype)
-        for i in range(mapped.size(0)):
-            refiner_to_solver.append(mapped[i].detach().cpu())
-
-
-    # # 生成private text plann思路数据
-    # gen_kwargs = build_generation_kwargs(
-    #     tokenizer,
-    #     max_new_tokens=max_new_tokens,
-    #     do_sample=do_sample,
-    #     temperature=temperature,
-    #     top_p=top_p,
-    # )
-    
-    # with torch.no_grad():
-    #     generated = model.generate(
-    #         inputs_embeds=batch_embeds,
-    #         attention_mask=attention_mask,
-    #         **gen_kwargs,
-    #     )
-
-    # sequences = generated.sequences if hasattr(generated, "sequences") else generated
-    # prompt_len = attention_mask.size(1)
-    
-    # if sequences.size(1) > max_new_tokens:
-    #     gen_ids = sequences[:, prompt_len:]
-    # else:
-    #     gen_ids = sequences
-        
-    # batch_texts = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-    # outputs = [text.strip() for text in batch_texts]
-    # outputs.extend([text.strip() for text in batch_texts])
-
-    # mem_bank["refiner"].append({"question":question,"ans":outputs[0]})
-
-    # print("Refiner Text Output ++++++++++++++++++++++++++++++", file=sys.stderr, flush=True)
-    # print(outputs, file=sys.stderr, flush=True)
-    
-    # release_resources(model, tokenizer, inner_2, outer_23)
-    return refiner_to_solver
-
-
-
-
-
-
-
-
-def run_refiner_latent_stage_outonly(
-    model,tokenizer,inner_2,outer_23,embed_layer,refiner_embed_dtype,
-    planner_latents: Sequence[torch.Tensor],
-    questions: Sequence[str],
-    latent_steps: int,
-    batch_size: int,
-    device: torch.device,
-    trust_remote_code: bool,
-    enable_thinking: bool,
-    args: argparse.Namespace,
- # 👇 新增文本生成相关参数
-    max_new_tokens: int,
-    do_sample: bool,
-    temperature: float,
-    top_p: float,
-    task_types: Optional[Sequence[str]] = None,
-    fn_names: Optional[Sequence[Optional[str]]] = None,
-    mem_bank=None,
-) -> List[str]:
-
-    embed_layer = model.get_input_embeddings()
-    embed_dtype = embed_layer.weight.dtype
-    hidden_size = embed_layer.weight.size(-1)
-
-    # if refiner_latents and refiner_latents[0].size(-1) != hidden_size:
-    #     raise RuntimeError(
-    #         "Refiner-to-solver latent dim does not match solver embedding dim: "
-    #         f"{refiner_latents[0].size(-1)} vs {hidden_size}"
-    #     )
-
-    prompt_segments = []
-    for idx, question in enumerate(questions):
-        if task_types is not None:
-            fn_name = fn_names[idx] if fn_names is not None else None
-            # user_prompt = build_code_refiner_prompt_with_slot(
-            #     question,
-            #     task_types[idx],
-            #     fn_name=fn_name,
-            # )
-            user_prompt = build_code_solver_prompt_with_slots(
-                question,
-                task_types[idx],
-                args=args,
-                mas_shape=args.mas_shape,
-                fn_name=fn_name,
-            )
-            
-        else:
-            user_prompt = build_math_solver_prompt_with_slots(question, args, mas_shape=args.mas_shape)
-        prompt_segments.append(
-            split_prompt_ids_by_slots(
-                tokenizer,
-                user_prompt,
-                [PLANNER_SLOT],
-                enable_thinking,
-            )
-        )
-
-    gen_kwargs = build_generation_kwargs(
-        tokenizer,
-        max_new_tokens=max_new_tokens,
-        do_sample=do_sample,
-        temperature=temperature,
-        top_p=top_p,
-    )
-
-    outputs: List[str] = []
-    total_batches = (len(questions) + batch_size - 1) // batch_size
-    for start, end in tqdm(
-        batch_iter_indices(len(questions), batch_size),
-        total=total_batches,
-        desc="solver text-from-latent",
-    ):
-        embed_seqs: List[torch.Tensor] = []
-        for idx in range(start, end):
-            seg_prefix, seg_suffix = prompt_segments[idx]
-            prefix_embeds = token_ids_to_embeds(
-                embed_layer,
-                seg_prefix,
-                device=device,
-                dtype=embed_dtype,
-            )
-            suffix_embeds = token_ids_to_embeds(
-                embed_layer,
-                seg_suffix,
-                device=device,
-                dtype=embed_dtype,
-            )
-            refiner_embed = planner_latents[idx].to(device=device, dtype=embed_dtype)
-            seq = torch.cat(
-                [
-                    prefix_embeds,
-                    refiner_embed,
-                    suffix_embeds,
-                ],
-                dim=0,
-            )
-            embed_seqs.append(seq)
-
-        batch_embeds, attention_mask = pad_left_embeds(embed_seqs, device=device)
-        with torch.no_grad():
-            generated = model.generate(
-                inputs_embeds=batch_embeds,
-                attention_mask=attention_mask,
-                **gen_kwargs,
-            )
-
-        sequences = generated.sequences if hasattr(generated, "sequences") else generated
-        prompt_len = attention_mask.size(1)
-        # `inputs_embeds` generation return format differs across model families:
-        # some return continuation-only, others return prompt+continuation.
-        # Use max_new_tokens as a robust discriminator to avoid truncating outputs.
-
-        if sequences.size(1) > max_new_tokens:
-            gen_ids = sequences[:, prompt_len:]
-        else:
-            gen_ids = sequences
-        print(f"{max_new_tokens}", file=sys.stderr, flush=True) #4000
-        batch_texts = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-        print(f"{gen_ids[0].tolist()}", file=sys.stderr, flush=True)
-        print(f"{batch_texts}", file=sys.stderr, flush=True)
-        outputs.extend([text.strip() for text in batch_texts])
-
-    # release_resources(model, tokenizer)
-    return outputs
-
-
-
-
-    
-
-    
 
 def run_refiner_latent_stage(
-    model,tokenizer,inner_2,outer_23,embed_layer,refiner_embed_dtype,
-    planner_latents: Sequence[torch.Tensor],
+    model_name_or_path: str,
     questions: Sequence[str],
+    planner_latents: Sequence[torch.Tensor],
+    agent2_inner_aligner_path: str,
+    outer_23_path: str,
+    outer_23_type: str,
     latent_steps: int,
     batch_size: int,
     device: torch.device,
+    model_dtype: torch.dtype,
+    outer_dtype: torch.dtype,
     trust_remote_code: bool,
+    inner_adapter_type_fallback: str,
     enable_thinking: bool,
     task_types: Optional[Sequence[str]] = None,
-    fn_name =  None,
+    fn_names: Optional[Sequence[Optional[str]]] = None,
 ) -> List[torch.Tensor]:
     if latent_steps == 0:
         out_dim = infer_outer_adapter_out_dim_from_file(outer_23_path)
         return [torch.empty((0, out_dim), dtype=torch.float32) for _ in questions]
 
+    model, tokenizer = load_agent_model_and_tokenizer(
+        model_name_or_path=model_name_or_path,
+        device=device,
+        dtype=model_dtype,
+        trust_remote_code=trust_remote_code,
+        agent_name="refiner",
+    )
+    embed_layer = model.get_input_embeddings()
+    refiner_embed_dtype = embed_layer.weight.dtype
+    refiner_hidden = embed_layer.weight.size(-1)
+
+    if planner_latents and planner_latents[0].size(-1) != refiner_hidden:
+        raise RuntimeError(
+            "Planner-to-refiner latent dim does not match refiner embedding dim: "
+            f"{planner_latents[0].size(-1)} vs {refiner_hidden}"
+        )
+
+    inner_2 = load_inner_adapter_module(
+        adapter_path=agent2_inner_aligner_path,
+        hidden_size=refiner_hidden,
+        device=device,
+        dtype=model_dtype,
+        fallback_adapter_type=inner_adapter_type_fallback,
+    )
+
+    probe_out_dim = infer_outer_adapter_out_dim_from_file(outer_23_path)
+    outer_23 = load_outer_adapter_module(
+        adapter_path=outer_23_path,
+        in_dim=refiner_hidden,
+        out_dim=probe_out_dim,
+        adapter_type=outer_23_type,
+        device=device,
+        dtype=outer_dtype,
+    )
+
     prompt_segments = []
     for idx, question in enumerate(questions):
         if task_types is not None:
-            # fn_name = fn_names[idx] if fn_names is not None else None
+            fn_name = fn_names[idx] if fn_names is not None else None
             user_prompt = build_code_refiner_prompt_with_slot(
                 question,
                 task_types[idx],
@@ -1812,7 +1277,7 @@ def run_refiner_latent_stage(
         for i in range(mapped.size(0)):
             refiner_to_solver.append(mapped[i].detach().cpu())
 
-    # release_resources(model, tokenizer, inner_2, outer_23)
+    release_resources(model, tokenizer, inner_2, outer_23)
     return refiner_to_solver
 
 
@@ -1938,392 +1403,6 @@ def run_solver_feedback_latent_stage(
     release_resources(model, tokenizer, inner_3, outer_31)
     return feedback_latents
 
-#我的 for planner的memory 先计算solver，并和refiner的latent合并
-def run_synth_latent_stage(
-
-    
-    model,tokenizer,inner_3,outer_31,embed_layer,solver_embed_dtype,
-    refiner_latents: Sequence[torch.Tensor],
-    questions: Sequence[str],
-    latent_steps: int,
-    batch_size: int,
-    device: torch.device,
-    trust_remote_code: bool,
-    enable_thinking: bool,
-    args: argparse.Namespace,
-    task_types: Optional[Sequence[str]] = None,
-    fn_names: Optional[Sequence[Optional[str]]] = None,
-
-) -> List[torch.Tensor]:
-    
-    # if latent_steps == 0:
-    #     out_dim = infer_outer_adapter_out_dim_from_file(outer_31_path)
-    #     return [torch.empty((0, out_dim), dtype=torch.float32) for _ in questions]
-
-    # model, tokenizer = load_agent_model_and_tokenizer(
-    #     model_name_or_path=model_name_or_path,
-    #     device=device,
-    #     dtype=model_dtype,
-    #     trust_remote_code=trust_remote_code,
-    #     agent_name="solver-feedback",
-    # )
-    # embed_layer = model.get_input_embeddings()
-    # solver_embed_dtype = embed_layer.weight.dtype
-    # solver_hidden = embed_layer.weight.size(-1)
-
-    # if refiner_latents and refiner_latents[0].size(-1) != solver_hidden:
-    #     raise RuntimeError(
-    #         "Refiner-to-solver latent dim does not match solver embedding dim: "
-    #         f"{refiner_latents[0].size(-1)} vs {solver_hidden}"
-    #     )
-
-    # inner_3 = load_inner_adapter_module(
-    #     adapter_path=agent3_inner_aligner_path,
-    #     hidden_size=solver_hidden,
-    #     device=device,
-    #     dtype=model_dtype,
-    #     fallback_adapter_type=inner_adapter_type_fallback,
-    # )
-
-    # probe_out_dim = infer_outer_adapter_out_dim_from_file(outer_31_path)
-    # outer_31 = load_outer_adapter_module(
-    #     adapter_path=outer_31_path,
-    #     in_dim=solver_hidden,
-    #     out_dim=probe_out_dim,
-    #     adapter_type=outer_31_type,
-    #     device=device,
-    #     dtype=outer_dtype,
-    # )
-
-    prompt_segments = []
-    for idx, question in enumerate(questions):
-        if task_types is not None:
-            fn_name = fn_names[idx] if fn_names is not None else None
-            user_prompt = build_code_solver_prompt_with_slots(
-                question,
-                task_types[idx],
-                args=args,
-                mas_shape=args.mas_shape,
-                fn_name=fn_name,
-            )
-        else:
-            user_prompt = build_math_solver_prompt_with_slots(question, args, mas_shape=args.mas_shape)
-        prompt_segments.append(
-            split_prompt_ids_by_slots(
-                tokenizer,
-                user_prompt,
-                [REFINED_SLOT],
-                enable_thinking,
-            )
-        )
-
-    feedback_latents: List[torch.Tensor] = []
-    total_batches = (len(questions) + batch_size - 1) // batch_size
-    for start, end in tqdm(
-        batch_iter_indices(len(questions), batch_size),
-        total=total_batches,
-        desc="solver feedback latent",
-    ):
-        embed_seqs: List[torch.Tensor] = []
-        for idx in range(start, end):
-            seg_prefix, seg_suffix = prompt_segments[idx]
-            prefix_embeds = token_ids_to_embeds(
-                embed_layer,
-                seg_prefix,
-                device=device,
-                dtype=solver_embed_dtype,
-            )
-            suffix_embeds = token_ids_to_embeds(
-                embed_layer,
-                seg_suffix,
-                device=device,
-                dtype=solver_embed_dtype,
-            )
-            refiner_embed = refiner_latents[idx].to(device=device, dtype=solver_embed_dtype)
-            seq = torch.cat([prefix_embeds, refiner_embed, suffix_embeds], dim=0)
-            embed_seqs.append(seq)
-
-        batch_embeds, attention_mask = pad_left_embeds(embed_seqs, device=device)
-        hidden_rollout = autoregressive_latent_rollout(
-            model=model,
-            rollout_inner_adapter=inner_3,
-            input_embeds=batch_embeds,
-            attention_mask=attention_mask,
-            latent_steps=latent_steps,
-        )
-        
-        solver_self = run_inner_adapter(
-            inner_3,
-            hidden_rollout,
-            output_dtype=solver_embed_dtype
-        )
-        
-        # 拼接 solver_latents + solver_self
-        # batch_solver_latents = torch.stack(
-        #     [
-        #         refiner_latents[idx].to(
-        #             device=device,
-        #             dtype=solver_embed_dtype
-        #         )
-        #         for idx in range(start, end)
-        #     ],
-        #     dim=0,
-        # )
-        
-        
-        # solver_input = torch.cat(
-        #     [
-        #         batch_solver_latents,
-        #         solver_self,
-        #     ],
-        #     dim=1,
-        # )
-        
-        solver_input = solver_self
-
-        #依然有退化问题。。。
-        
-        mapped_feedback = run_outer_adapter(
-            outer_31,
-            solver_input,
-            output_dtype=torch.float32,
-        )
-
-    release_resources(model, tokenizer, inner_3, outer_31)
-    return mapped_feedback
-
-
-#生成latent mem + refiner latent
-def run_synth_latent_stage_3(
-
-    model,tokenizer,inner_1,outer_12,embed_layer,planner_embed_dtype,
-    questions: Sequence[str],
-    latent_steps: int,
-    batch_size: int,
-    
-    feedback_latents: Sequence[torch.Tensor], 
-
-    syn_mem: None, #传递mem
-    
-    # 👇 新增文本生成相关参数
-    max_new_tokens: int,
-    do_sample: bool,
-    temperature: float,
-    top_p: float,
-    device: torch.device,
-    trust_remote_code: bool,
-    enable_thinking: bool,
-    task_types: Optional[Sequence[str]] = None,
-    fn_names: Optional[Sequence[Optional[str]]] = None,
-) -> Tuple[List[str], List[torch.Tensor]]:  # 👇 修改返回类型，同时返回 Text 和 Latent 列表
-    
-    prompt_segments = []
-    for idx, question in enumerate(questions):
-        if task_types is not None:
-            fn_name = fn_names[idx] if fn_names is not None else None
-            #构建记忆生成prompt
-            # if syn_mem is not None and False:
-            if syn_mem is not None:
-                user_prompt = build_updated_synthesize_prompt_with_slot(
-                    question,
-                )
-            else:
-                user_prompt = build_synthesize_prompt_with_slot(
-                    question,
-                )
-        else:
-            user_prompt = build_math_planner_prompt_with_feedback_slot(question)
-
-        #更新 or 初始化mem
-        # prompt_segments.append(
-        #     tokenizer(
-        #         render_chat_prompt(
-        #             tokenizer,
-        #             user_prompt,
-        #             enable_thinking,
-        #         ),
-        #         add_special_tokens=False,
-        #     )["input_ids"]
-        # )
-        
-        # if syn_mem is not None and False:
-        if syn_mem is not None:
-            # SYN放哪里？
-            prompt_segments.append(
-                split_prompt_ids_by_slots(
-                    tokenizer,
-                    user_prompt,
-                    [SYN_SLOT,OLD_SYN_SLOT],
-                    enable_thinking,
-                )
-            )
-        else:
-
-            #得到syn_slot之前和之后的input id
-            prompt_segments.append(
-                split_prompt_ids_by_slots(
-                    tokenizer,
-                    user_prompt,
-                    [SYN_SLOT],
-                    enable_thinking,
-                )
-            )
-
-
-        
-        # tokoenize 之后的值
-        # print("prompt segments==================", file=sys.stderr, flush=True)
-        # print(prompt_segments, file=sys.stderr, flush=True)
-    
-    # 👇 构建生成 kwargs
-    gen_kwargs = build_generation_kwargs(
-        tokenizer,
-        max_new_tokens=max_new_tokens,
-        do_sample=do_sample,
-        temperature=temperature,
-        top_p=top_p,
-    )
-
-    outputs: List[str] = []
-    all_planner_self: List[torch.Tensor] = []  # 👇 用于累积保存所有 Batch 的 planner_self
-    
-    total_batches = (len(questions) + batch_size - 1) // batch_size
-    for start, end in tqdm(
-        batch_iter_indices(len(questions), batch_size),
-        total=total_batches,
-        desc="planner feedback text and latent",
-    ):
-        embed_seqs: List[torch.Tensor] = []
-        for idx in range(start, end):
-
-            #纯text
-            # input_ids = prompt_segments[idx]
-            
-            # prompt_embeds = token_ids_to_embeds(
-            #     embed_layer,
-            #     input_ids,
-            #     device=device,
-            #     dtype=planner_embed_dtype,
-            # )
-            
-            # seq = prompt_embeds
-
-            #插入latent
-            
-            # if syn_mem is not None and False:
-            if syn_mem is not None:
-                seg0, seg1, seg2 = prompt_segments[idx]
-                prefix_embeds = token_ids_to_embeds(
-                    embed_layer,
-                    seg0,
-                    device=device,
-                    dtype=planner_embed_dtype,
-                )
-                
-                middle_embeds = token_ids_to_embeds(
-                    embed_layer,
-                    seg1,
-                    device=device,
-                    dtype=planner_embed_dtype,
-                )
-                
-                suffix_embeds = token_ids_to_embeds(
-                    embed_layer,
-                    seg2,
-                    device=device,
-                    dtype=planner_embed_dtype,
-                )
-
-                old_mem_embed = syn_mem[idx].to(
-                    device=device,
-                    dtype=planner_embed_dtype,
-                )
-                
-                feedback_embed = feedback_latents[idx].to(
-                    device=device,
-                    dtype=planner_embed_dtype,
-                )
-                seq = torch.cat(
-                    [
-                        prefix_embeds,
-                        feedback_embed,
-                        middle_embeds,
-                        old_mem_embed,
-                        suffix_embeds,
-                    ],
-                    dim=0
-                )
-
-            else:
-                
-                #把之前/之后的token id进行tokenize
-                seg_prefix, seg_suffix = prompt_segments[idx]
-                prefix_embeds = token_ids_to_embeds(
-                    embed_layer,
-                    seg_prefix,
-                    device=device,
-                    dtype=planner_embed_dtype,
-                )
-                suffix_embeds = token_ids_to_embeds(
-                    embed_layer,
-                    seg_suffix,
-                    device=device,
-                    dtype=planner_embed_dtype,
-                )
-                #把所有的token拼在一起
-                feedback_embed = feedback_latents[idx].to(device=device, dtype=planner_embed_dtype)
-                seq = torch.cat([prefix_embeds, feedback_embed, suffix_embeds], dim=0)
-            
-            embed_seqs.append(seq)
-
-        batch_embeds, attention_mask = pad_left_embeds(embed_seqs, device=device)
-        
-        # ---------------------------------------------------------
-        # 👇 1. 文本生成部分 (Text Generation)
-        # ---------------------------------------------------------
-        with torch.no_grad():
-            generated = model.generate(
-                inputs_embeds=batch_embeds,
-                attention_mask=attention_mask,
-                **gen_kwargs,
-            )
-
-        sequences = generated.sequences if hasattr(generated, "sequences") else generated
-        prompt_len = attention_mask.size(1)
-        
-        if sequences.size(1) > max_new_tokens:
-            gen_ids = sequences[:, prompt_len:]
-        else:
-            gen_ids = sequences
-            
-        batch_texts = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-        outputs.extend([text.strip() for text in batch_texts])
-
-        # ---------------------------------------------------------
-        # 👇 2. 隐式计算部分 (Latent Rollout) - 保持原本逻辑
-        # ---------------------------------------------------------
-        hidden_rollout = autoregressive_latent_rollout(
-            model=model,
-            rollout_inner_adapter=inner_1,
-            input_embeds=batch_embeds,
-            attention_mask=attention_mask,
-            latent_steps=latent_steps,
-        )
-        planner_self = run_inner_adapter(inner_1, hidden_rollout, output_dtype=planner_embed_dtype)
-        
-        # 将当前 Batch 的 Latent 记录下来（防止被下一个 Batch 覆盖）
-        for i in range(planner_self.size(0)):
-            all_planner_self.append(planner_self[i].detach().cpu())
-            
-        # 如果你未来需要跑 outer adapter, 依旧可以取消下方注释
-        # lat12 = run_outer_adapter(outer_12, planner_self, output_dtype=planner_embed_dtype)
-        # for i in range(lat12.size(0)):
-        #     planner_to_refiner.append(lat12[i].detach().cpu())
-
-    # release_resources(model, tokenizer, inner_1, outer_12)
-    
-    # 👇 同时返回文本形式/Latent形式的 Memory
-    return outputs, all_planner_self
 
 def run_planner_feedback_latent_stage(
     model_name_or_path: str,
@@ -2446,7 +1525,7 @@ def run_planner_feedback_latent_stage(
 
 
 def run_solver_latent_stage(
-    model,tokenizer,embed_layer,embed_dtype,
+    model_name_or_path: str,
     questions: Sequence[str],
     refiner_latents: Sequence[torch.Tensor],
     args: argparse.Namespace,
@@ -2460,54 +1539,36 @@ def run_solver_latent_stage(
     trust_remote_code: bool,
     enable_thinking: bool,
     task_types: Optional[Sequence[str]] = None,
-    fn_name: str = None,
-    mem_bank = None,
-    check_list=None
-    
+    fn_names: Optional[Sequence[Optional[str]]] = None,
 ) -> List[str]:
-    # model, tokenizer = load_agent_model_and_tokenizer(
-    #     model_name_or_path=model_name_or_path,
-    #     device=device,
-    #     dtype=dtype,
-    #     trust_remote_code=trust_remote_code,
-    #     agent_name="solver",
-    # )
-    # embed_layer = model.get_input_embeddings()
-    # embed_dtype = embed_layer.weight.dtype
-    # hidden_size = embed_layer.weight.size(-1)
+    model, tokenizer = load_agent_model_and_tokenizer(
+        model_name_or_path=model_name_or_path,
+        device=device,
+        dtype=dtype,
+        trust_remote_code=trust_remote_code,
+        agent_name="solver",
+    )
+    embed_layer = model.get_input_embeddings()
+    embed_dtype = embed_layer.weight.dtype
+    hidden_size = embed_layer.weight.size(-1)
 
-    # if refiner_latents and refiner_latents[0].size(-1) != hidden_size:
-    #     raise RuntimeError(
-    #         "Refiner-to-solver latent dim does not match solver embedding dim: "
-    #         f"{refiner_latents[0].size(-1)} vs {hidden_size}"
-    #     )
+    if refiner_latents and refiner_latents[0].size(-1) != hidden_size:
+        raise RuntimeError(
+            "Refiner-to-solver latent dim does not match solver embedding dim: "
+            f"{refiner_latents[0].size(-1)} vs {hidden_size}"
+        )
 
     prompt_segments = []
     for idx, question in enumerate(questions):
         if task_types is not None:
-            #if True:
-            if mem_bank["solver"] == [] or not ENABLE_SOLVER_MEM:
-                user_prompt = build_code_solver_prompt_with_slots(
-                    question,
-                    task_types[idx],
-                    args=args,
-                    mas_shape=args.mas_shape,
-                    fn_name=fn_name,
-                    check_list=check_list
-                )
-            else:
-                solver_mems = mem_bank.get("solver", [])
-                if len(solver_mems) > 0:
-                    q_emb = get_question_embedding(question, tokenizer, embed_layer, device)
-                    q, matched_ans = retrieve_most_similar_ans(q_emb, mem_bank,"solver")
-                    # print(f"The question is", file=sys.stderr, flush=True)
-                    # print(f"{question}", file=sys.stderr, flush=True)
-                    print(f"The most similar solution is:", file=sys.stderr, flush=True)
-                    print(f"{matched_ans}", file=sys.stderr, flush=True)
-                    
-                user_prompt = build_code_solver_prompt_with_slots(question,task_types[idx], fn_name=fn_name,past_q=q, past_ans = matched_ans,check_list=check_list)
-            # print(f"{user_prompt}", file=sys.stderr, flush=True)
-                
+            fn_name = fn_names[idx] if fn_names is not None else None
+            user_prompt = build_code_solver_prompt_with_slots(
+                question,
+                task_types[idx],
+                args=args,
+                mas_shape=args.mas_shape,
+                fn_name=fn_name,
+            )
         else:
             user_prompt = build_math_solver_prompt_with_slots(question, args, mas_shape=args.mas_shape)
         prompt_segments.append(
@@ -2519,7 +1580,6 @@ def run_solver_latent_stage(
             )
         )
 
-
     gen_kwargs = build_generation_kwargs(
         tokenizer,
         max_new_tokens=max_new_tokens,
@@ -2530,7 +1590,6 @@ def run_solver_latent_stage(
 
     outputs: List[str] = []
     total_batches = (len(questions) + batch_size - 1) // batch_size
-    ## 把latent转换为text 走正常输出流程
     for start, end in tqdm(
         batch_iter_indices(len(questions), batch_size),
         total=total_batches,
@@ -2582,12 +1641,7 @@ def run_solver_latent_stage(
         batch_texts = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
         outputs.extend([text.strip() for text in batch_texts])
 
-        # if True:
-        if ENABLE_SOLVER_MEM:
-            mem_bank["solver"].append({"question":question,"ans":outputs[0],
-            "embedding": get_question_embedding(question, tokenizer, embed_layer, device)})  # 转到 CPU 释放显存})
-    
-    # release_resources(model, tokenizer)
+    release_resources(model, tokenizer)
     return outputs
 
 
@@ -2643,9 +1697,6 @@ def run_answer_retry_stage(
     )
 
     updated_outputs = list(outputs)
-    # print("updated_outputs:", file=sys.stderr, flush=True)
-    # print(updated_outputs, file=sys.stderr, flush=True)
-    
     prompts = [
         f"{updated_outputs[idx].rstrip()}\n{retry_suffix}"
         for idx in pending_indices
@@ -2916,11 +1967,6 @@ def main() -> None:
     planner_model = args.agent1_model_name_or_path
     refiner_model = args.agent2_model_name_or_path
     solver_model = args.agent3_model_name_or_path
-
-    #新增
-
-    synth_model = args.agent1_model_name_or_path
-    
     if not planner_model or not refiner_model or not solver_model:
         raise ValueError(
             "Please provide all of "
@@ -2973,7 +2019,7 @@ def main() -> None:
         mbppplus_cache_dir=args.mbppplus_cache_dir,
         mbppplus_num_prompt_tests=int(args.mbppplus_num_prompt_tests),
     )
-    print(questions[0], file=sys.stderr, flush=True)
+
     is_code_eval = is_code_eval_dataset(dataset_name)
     code_eval_timeout_s = int(args.mbppplus_timeout_s) if is_mbppplus_dataset(dataset_name) else int(args.lcb_timeout_s)
     task_types: Optional[List[str]] = None
@@ -3156,33 +2202,7 @@ def main() -> None:
 
     solver_rollout_latents: Optional[List[torch.Tensor]] = None
     text_recursive_solver_outputs_rounds_for_log: Optional[List[List[str]]] = None
-    print("LOADED MAIN++++++++++++++++++++++++++++++++++++++++++++++++++++++++", file=sys.stderr, flush=True)
-    print(args.method, file=sys.stderr, flush=True)
 
-
-   
-        
-    
-    # 正常text 2 text测试
-    # test_outputs = run_solver_text_stage(
-    #     model_name_or_path=solver_model,
-    #     questions=questions,
-    #     args=args,
-    #     batch_size=args.batch_size,
-    #     max_new_tokens=args.max_new_tokens,
-    #     do_sample=args.do_sample,
-    #     temperature=args.temperature,
-    #     top_p=args.top_p,
-    #     device=device,
-    #     dtype=model_dtype,
-    #     trust_remote_code=trust_remote_code,
-    #     enable_thinking=enable_thinking,
-    #     task_types=task_types,
-    #     fn_names=fn_names,
-    # )
-    # print(test_outputs,file=sys.stderr, flush=True)
-
-    
     if args.method == "text":
         planner_outputs, planner_inputs_rendered = run_text_generation_stage(
             stage_name="planner",
@@ -3433,8 +2453,6 @@ def main() -> None:
             task_types=task_types,
             fn_names=fn_names,
         )
-
-
         planner_to_refiner_desc = [format_latent_info(x) for x in planner_to_refiner]
         refiner_to_solver_desc = [format_latent_info(x) for x in refiner_to_solver]
         solver_rollout_latents = [x for x in refiner_to_solver]
@@ -3481,675 +2499,211 @@ def main() -> None:
             a3_in = a3_in.replace(REFINED_SLOT, refiner_to_solver_desc[i])
             agent3_inputs.append(a3_in)
         agent3_outputs = solver_outputs
-        
     else:
+        recursive_rounds = int(args.num_recursive_rounds)
+        planner_to_refiner_rounds: List[List[torch.Tensor]] = []
+        refiner_to_solver_rounds: List[List[torch.Tensor]] = []
+        feedback_to_planner_rounds: List[List[torch.Tensor]] = []
 
-        #从这里开始 预加载所有model和adapter
-        #加载planner
-        model_planner, tokenizer_planner = load_agent_model_and_tokenizer(
-                model_name_or_path=planner_model,
-                device=device,
-                dtype=model_dtype,
-                trust_remote_code=trust_remote_code,
-                agent_name="planner",
-            )
-        embed_layer_planner = model_planner.get_input_embeddings()
-        planner_embed_dtype = embed_layer_planner.weight.dtype
-        planner_hidden = embed_layer_planner.weight.size(-1)
-    
-        inner_1 = load_inner_adapter_module(
-            adapter_path=args.agent1_inner_aligner_path,
-            hidden_size=planner_hidden,
-            device=device,
-            dtype=model_dtype,
-            fallback_adapter_type=args.inner_adapter_type_fallback,
-        )
-    
-        planner_probe_out_dim = infer_outer_adapter_out_dim_from_file(outer_12_path)
-        
-        outer_12 = load_outer_adapter_module(
-            adapter_path=outer_12_path,
-            in_dim=planner_hidden,
-            out_dim=planner_probe_out_dim,
-            adapter_type=outer_12_type,
-            device=device,
-            dtype=outer_dtype,
-        )
-                
-        #加载refiner
-        model_refiner, tokenizer_refiner = load_agent_model_and_tokenizer(
-                model_name_or_path=refiner_model,
-                device=device,
-                dtype=model_dtype,
-                trust_remote_code=trust_remote_code,
-                agent_name="refiner",
-            )
-        embed_layer_refiner = model_refiner.get_input_embeddings()
-        refiner_embed_dtype = embed_layer_refiner.weight.dtype
-        refiner_hidden = embed_layer_refiner.weight.size(-1)
-
-        inner_2 = load_inner_adapter_module(
-            adapter_path=args.agent2_inner_aligner_path,
-            hidden_size=refiner_hidden,
-            device=device,
-            dtype=model_dtype,
-            fallback_adapter_type=args.inner_adapter_type_fallback,
-        )
-    
-        refiner_probe_out_dim = infer_outer_adapter_out_dim_from_file(outer_23_path)
-        
-        outer_23 = load_outer_adapter_module(
-            adapter_path=outer_23_path,
-            in_dim=refiner_hidden,
-            out_dim=refiner_probe_out_dim,
-            adapter_type=outer_23_type,
-            device=device,
-            dtype=outer_dtype,
-        )
-
-        # refiner_outputs_r = run_text_generation_stage_mine(
-        #     model = model_refiner,
-        #     tokenizer = tokenizer_refiner,
-        #     user_prompts=["Who are you?"],
-        #     batch_size=args.batch_size,
-        #     max_new_tokens=args.max_new_tokens,
-        #     do_sample=args.do_sample,
-        #     temperature=args.temperature,
-        #     top_p=args.top_p,
-        #     device=device,
-        #     dtype=model_dtype,
-        #     trust_remote_code=trust_remote_code,
-        #     enable_thinking=enable_thinking,
-        # )
-        
-        # print(refiner_outputs_r, file=sys.stderr, flush=True)
-        
-
-        #加载solver
-        model_solver, tokenizer_solver = load_agent_model_and_tokenizer(
-                model_name_or_path=solver_model,
-                device=device,
-                dtype=model_dtype,
-                trust_remote_code=trust_remote_code,
-                agent_name="solver",
-            )
-        embed_layer_solver = model_solver.get_input_embeddings()
-        solver_embed_dtype = embed_layer_solver.weight.dtype
-        solver_hidden = embed_layer_solver.weight.size(-1)
-    
-        inner_3 = load_inner_adapter_module(
-            adapter_path=args.agent3_inner_aligner_path,
-            hidden_size=solver_hidden,
-            device=device,
-            dtype=model_dtype,
-            fallback_adapter_type=args.inner_adapter_type_fallback,
-        )
-    
-        solver_probe_out_dim = infer_outer_adapter_out_dim_from_file(outer_31_path)
-        outer_31 = load_outer_adapter_module(
-            adapter_path=outer_31_path,
-            in_dim=solver_hidden,
-            out_dim=solver_probe_out_dim,
-            adapter_type=outer_31_type,
-            device=device,
-            dtype=outer_dtype,
-        )
-
-        mem_bank = {
-            "planner": [],
-            "refiner": [],
-            "solver": []
-
-        }
-        
-        
-        # 存所有题的log
-        agent1_outputs=[]
-        agent2_inputs=[]
-        agent2_outputs=[]
-        agent3_inputs=[]
-        agent3_outputs=[]
-        agent1_inputs_for_log=[]
-
-        syn_mem = None
-
-
-
-
-
-        def generate_text(prompt, model, tokenizer, device, gen_kwargs):
-            inputs = tokenizer(
-                prompt,
-                return_tensors="pt",
-                truncation=False,
-            ).to(device)
-        
-            with torch.no_grad():
-                generated = model.generate(
-                    input_ids=inputs["input_ids"],
-                    attention_mask=inputs["attention_mask"],
-                    **gen_kwargs,
-                )
-        
-            prompt_len = inputs["input_ids"].size(1)
-            gen_ids = generated[:, prompt_len:]
-        
-            return tokenizer.decode(
-                gen_ids[0],
-                skip_special_tokens=True,
-            ).strip()
-        
-
-        check_list = "Empty"
-            
-        # 顺序执行而不是batch
-        for q_idx, question in enumerate(questions):
-            syn_mem = None
-            print(
-                f"processing {q_idx}/{len(questions)}",
-                file=sys.stderr
-            )
-            
-            recursive_rounds = int(args.num_recursive_rounds)
-            planner_to_refiner_rounds: List[List[torch.Tensor]] = []
-            refiner_to_solver_rounds: List[List[torch.Tensor]] = []
-            feedback_to_planner_rounds: List[List[torch.Tensor]] = []
-    
-            feedback_to_planner: Optional[List[torch.Tensor]] = None
-    
-            
-            for round_idx in range(recursive_rounds):
-                if round_idx == 0:
-    
-                    # planner_to_refiner = run_planner_latent_stage(
-                    #     model = model_planner,
-                    #     tokenizer =  tokenizer_planner,
-                    #     inner_1 = inner_1,
-                    #     outer_12 = outer_12,
-                    #     embed_layer = embed_layer_planner,
-                    #     planner_embed_dtype = planner_embed_dtype,
-                    #     syn_mem = syn_mem, #加载latent mem
-                    #     questions=[question],   # 注意这里
-                    #     latent_steps=args.latent_steps,
-                    #     batch_size=args.batch_size,
-                    #     device=device,
-                    #     enable_thinking=enable_thinking,
-                    #     task_types=task_types,
-                    #     fn_names=fn_names,
-                    #     trust_remote_code=trust_remote_code,
-
-                    # )
-                    
-                    planner_to_refiner = run_planner_latent_stage_pri(
-                        model = model_planner,
-                        tokenizer =  tokenizer_planner,
-                        inner_1 = inner_1,
-                        outer_12 = outer_12,
-                        embed_layer = embed_layer_planner,
-                        planner_embed_dtype = planner_embed_dtype,
-                        syn_mem = syn_mem, #加载latent mem
-                        questions=[question],   # 注意这里
-                        latent_steps=args.latent_steps,
-                        batch_size=args.batch_size,
-                        device=device,
-                        enable_thinking=enable_thinking,
-                        task_types=task_types,
-                        fn_name=fn_names[q_idx],
-                        trust_remote_code=trust_remote_code,
-                        
-                        mem_bank = mem_bank,
-                        max_new_tokens=args.max_new_tokens,
-                        do_sample=args.do_sample,
-                        temperature=args.temperature,
-                        top_p=args.top_p,
-                    )
-                    print(f"Planner Complete", file=sys.stderr, flush=True)
-                else:
-                    #跑feedback，这个是planner->refiner
-                    if feedback_to_planner is None:
-                        raise RuntimeError("Missing recursive feedback latents for planner stage.")
-                    planner_to_refiner = run_planner_feedback_latent_stage(
-                        model_name_or_path=planner_model,
-                        questions=[question],   # 注意这里
-                        feedback_latents=feedback_to_planner,
-                        agent1_inner_aligner_path=args.agent1_inner_aligner_path,
-                        outer_12_path=outer_12_path,
-                        outer_12_type=outer_12_type,
-                        latent_steps=args.latent_steps,
-                        batch_size=args.batch_size,
-                        device=device,
-                        model_dtype=model_dtype,
-                        outer_dtype=outer_dtype,
-                        trust_remote_code=trust_remote_code,
-                        inner_adapter_type_fallback=args.inner_adapter_type_fallback,
-                        enable_thinking=enable_thinking,
-                    )
-                planner_to_refiner = [x for x in planner_to_refiner]
-                planner_to_refiner_rounds.append(planner_to_refiner)
-    
-                # print(planner_to_refiner[0].shape, file=sys.stderr, flush=True)
-                # print(planner_to_refiner[0].tolist(), file=sys.stderr, flush=True)
-                refiner_to_solver = run_refiner_latent_stage(
-                    model = model_refiner,
-                    tokenizer =  tokenizer_refiner,
-                    inner_2 = inner_2,
-                    outer_23 = outer_23,
-                    embed_layer = embed_layer_refiner,
-                    refiner_embed_dtype = refiner_embed_dtype,
-                    planner_latents = planner_to_refiner,
-                    questions=[question],   # 注意这里
+        feedback_to_planner: Optional[List[torch.Tensor]] = None
+        for round_idx in range(recursive_rounds):
+            if round_idx == 0:
+                planner_to_refiner = run_planner_latent_stage(
+                    model_name_or_path=planner_model,
+                    questions=questions,
+                    agent1_inner_aligner_path=args.agent1_inner_aligner_path,
+                    outer_12_path=outer_12_path,
+                    outer_12_type=outer_12_type,
                     latent_steps=args.latent_steps,
                     batch_size=args.batch_size,
                     device=device,
+                    model_dtype=model_dtype,
+                    outer_dtype=outer_dtype,
+                    trust_remote_code=trust_remote_code,
+                    inner_adapter_type_fallback=args.inner_adapter_type_fallback,
                     enable_thinking=enable_thinking,
                     task_types=task_types,
-                    fn_name=fn_names[q_idx],
-                    trust_remote_code=trust_remote_code,
+                    fn_names=fn_names,
                 )
+            else:
+                if feedback_to_planner is None:
+                    raise RuntimeError("Missing recursive feedback latents for planner stage.")
+                planner_to_refiner = run_planner_feedback_latent_stage(
+                    model_name_or_path=planner_model,
+                    questions=questions,
+                    feedback_latents=feedback_to_planner,
+                    agent1_inner_aligner_path=args.agent1_inner_aligner_path,
+                    outer_12_path=outer_12_path,
+                    outer_12_type=outer_12_type,
+                    latent_steps=args.latent_steps,
+                    batch_size=args.batch_size,
+                    device=device,
+                    model_dtype=model_dtype,
+                    outer_dtype=outer_dtype,
+                    trust_remote_code=trust_remote_code,
+                    inner_adapter_type_fallback=args.inner_adapter_type_fallback,
+                    enable_thinking=enable_thinking,
+                )
+            planner_to_refiner = [x for x in planner_to_refiner]
+            planner_to_refiner_rounds.append(planner_to_refiner)
 
-                print(f"Refinner Complete", file=sys.stderr, flush=True)
-                # refiner_to_solver = run_refiner_latent_stage_pri(
-                #     model = model_refiner,
-                #     tokenizer =  tokenizer_refiner,
-                #     inner_2 = inner_2,
-                #     outer_23 = outer_23,
-                #     embed_layer = embed_layer_refiner,
-                #     refiner_embed_dtype = refiner_embed_dtype,
-                #     planner_latents = planner_to_refiner,
-                #     questions=[question],   # 注意这里
-                #     latent_steps=args.latent_steps,
-                #     batch_size=args.batch_size,
-                #     device=device,
-                #     enable_thinking=enable_thinking,
-                #     task_types=task_types,
-                #     fn_names=fn_names,
-                #     trust_remote_code=trust_remote_code,
-                    
-                #     mem_bank = mem_bank,
-                #     max_new_tokens=args.max_new_tokens,
-                #     do_sample=args.do_sample,
-                #     temperature=args.temperature,
-                #     top_p=args.top_p,
-                # )
-                
-                # print(out, file=sys.stderr, flush=True)
-                # print(mem_bank, file=sys.stderr, flush=True)
-
-                
-                # refiner_to_solver = run_refiner_latent_stage(
-                #     model_name_or_path=refiner_model,
-                #     questions=questions,
-                #     planner_latents=planner_to_refiner,
-                #     agent2_inner_aligner_path=args.agent2_inner_aligner_path,
-                #     outer_23_path=outer_23_path,
-                #     outer_23_type=outer_23_type,
-                #     latent_steps=args.latent_steps,
-                #     batch_size=args.batch_size,
-                #     device=device,
-                #     model_dtype=model_dtype,
-                #     outer_dtype=outer_dtype,
-                #     trust_remote_code=trust_remote_code,
-                #     inner_adapter_type_fallback=args.inner_adapter_type_fallback,
-                #     enable_thinking=enable_thinking,
-                #     task_types=task_types,
-                #     fn_names=fn_names,
-                # )
-                refiner_to_solver = [x for x in refiner_to_solver]
-                refiner_to_solver_rounds.append(refiner_to_solver)
-    
-                #还有剩余recur round，不输出text，solver->下一轮planner
-                if round_idx < recursive_rounds - 1:
-                    feedback_to_planner = run_solver_feedback_latent_stage(
-                        model_name_or_path=solver_model,
-                        questions=[question],   # 注意这里
-                        refiner_latents=refiner_to_solver,
-                        agent3_inner_aligner_path=args.agent3_inner_aligner_path,
-                        outer_31_path=outer_31_path,
-                        outer_31_type=outer_31_type,
-                        latent_steps=args.latent_steps,
-                        batch_size=args.batch_size,
-                        device=device,
-                        model_dtype=model_dtype,
-                        outer_dtype=outer_dtype,
-                        trust_remote_code=trust_remote_code,
-                        inner_adapter_type_fallback=args.inner_adapter_type_fallback,
-                        enable_thinking=enable_thinking,
-                        args=args,
-                        task_types=task_types,
-                        fn_names=fn_names,
-                    )
-                    feedback_to_planner = [x for x in feedback_to_planner]
-                    feedback_to_planner_rounds.append(feedback_to_planner)                
-    
-            final_refiner_to_solver = refiner_to_solver_rounds[-1]
-            print(f"Solver Complete", file=sys.stderr, flush=True)
-            # 计算solver 然后拼接solver和synthesiszer 需要参考 run_solver_feedback_latent_stage
-            # concat_output = run_synth_latent_stage(
-            #     model = model_solver,
-            #     tokenizer =  tokenizer_solver,
-            #     inner_3 = inner_3,
-            #     outer_31 = outer_31,
-            #     embed_layer = embed_layer_solver,
-            #     solver_embed_dtype = solver_embed_dtype,
-            #     questions=[question],   # 注意这里
-            #     refiner_latents=refiner_to_solver,
-
-            #     args=args,
-            #     latent_steps=args.latent_steps,
-            #     batch_size=args.batch_size,
-            #     device=device,
-            #     enable_thinking=enable_thinking,
-            #     task_types=task_types,
-            #     fn_names=fn_names,
-            #     trust_remote_code=trust_remote_code,
-            # )
-            # concat_output = [concat_output.squeeze(0)] #确实是list类型 size OK
-            # print(f"{concat_output[0].shape}", file=sys.stderr, flush=True)
-            # 输出是planner的输入 2048大小
-            # torch.Size([1, 32, 2048])
-            # print(f"{latent_mem.shape}", file=sys.stderr, flush=True)
-            # torch.Size([1, 32, 2048])
-    
-            #根据拼接latent 生成记忆+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-            
-            # texts, latents = run_synth_latent_stage_3(
-
-            #     model = model_planner,
-            #     tokenizer =  tokenizer_planner,
-            #     inner_1 = inner_1,
-            #     outer_12 = outer_12,
-            #     embed_layer = embed_layer_planner,
-            #     planner_embed_dtype = planner_embed_dtype,
-            #     questions=[question],   # 注意这里
-            #     latent_steps=args.latent_steps,
-            #     batch_size=args.batch_size,
-
-            #     feedback_latents=concat_output,
-            #     syn_mem = syn_mem, #传递mem
-
-            #     device=device,
-            #     trust_remote_code=trust_remote_code,
-            #     enable_thinking=enable_thinking,
-                
-            #     max_new_tokens=args.max_new_tokens,
-            #     do_sample=args.do_sample,
-            #     temperature=args.temperature,
-            #     top_p=args.top_p,
-            #     task_types=task_types,
-            #     fn_names=fn_names,
-                
-            # )
-            # print("START MEMORY SYTH ===============================", file=sys.stderr, flush=True)
-            # print(texts, file=sys.stderr, flush=True)
-    
-            # syn_mem = latents #更新latent记忆
-            
-            #最后一轮走正常输出，直接输出text （好像不能替代，因为这个是专门生成text的）
-    
-            solver_outputs = run_solver_latent_stage(
-                model = model_solver,
-                tokenizer =  tokenizer_solver,
-                embed_layer = embed_layer_solver,
-                embed_dtype = solver_embed_dtype,
-                
-                questions=[question],   # 注意这里
-                refiner_latents=final_refiner_to_solver,
-                args=args,
+            refiner_to_solver = run_refiner_latent_stage(
+                model_name_or_path=refiner_model,
+                questions=questions,
+                planner_latents=planner_to_refiner,
+                agent2_inner_aligner_path=args.agent2_inner_aligner_path,
+                outer_23_path=outer_23_path,
+                outer_23_type=outer_23_type,
+                latent_steps=args.latent_steps,
                 batch_size=args.batch_size,
-                max_new_tokens=args.max_new_tokens,
-                do_sample=args.do_sample,
-                temperature=args.temperature,
-                top_p=args.top_p,
                 device=device,
-                dtype=model_dtype,
+                model_dtype=model_dtype,
+                outer_dtype=outer_dtype,
                 trust_remote_code=trust_remote_code,
+                inner_adapter_type_fallback=args.inner_adapter_type_fallback,
                 enable_thinking=enable_thinking,
                 task_types=task_types,
-                fn_name=fn_names[q_idx],
-                mem_bank=mem_bank,
-                check_list=check_list
+                fn_names=fn_names,
             )
+            refiner_to_solver = [x for x in refiner_to_solver]
+            refiner_to_solver_rounds.append(refiner_to_solver)
 
-            
-            #完整的text输出 这个是怎么直接输出text的?
-            # print("Answer ===============================", file=sys.stderr, flush=True)
-            # print(solver_outputs,file=sys.stderr, flush=True)
+            if round_idx < recursive_rounds - 1:
+                feedback_to_planner = run_solver_feedback_latent_stage(
+                    model_name_or_path=solver_model,
+                    questions=questions,
+                    refiner_latents=refiner_to_solver,
+                    agent3_inner_aligner_path=args.agent3_inner_aligner_path,
+                    outer_31_path=outer_31_path,
+                    outer_31_type=outer_31_type,
+                    latent_steps=args.latent_steps,
+                    batch_size=args.batch_size,
+                    device=device,
+                    model_dtype=model_dtype,
+                    outer_dtype=outer_dtype,
+                    trust_remote_code=trust_remote_code,
+                    inner_adapter_type_fallback=args.inner_adapter_type_fallback,
+                    enable_thinking=enable_thinking,
+                    args=args,
+                    task_types=task_types,
+                    fn_names=fn_names,
+                )
+                feedback_to_planner = [x for x in feedback_to_planner]
+                feedback_to_planner_rounds.append(feedback_to_planner)
 
-                    
-            planner_to_refiner_desc_rounds = [
-                [format_latent_info(x) for x in round_latents] for round_latents in planner_to_refiner_rounds
-            ]
-            refiner_to_solver_desc_rounds = [
-                [format_latent_info(x) for x in round_latents] for round_latents in refiner_to_solver_rounds
-            ]
-            feedback_to_planner_desc_rounds = [
-                [format_latent_info(x) for x in round_latents] for round_latents in feedback_to_planner_rounds
-            ]
-            solver_rollout_latents = [x for x in final_refiner_to_solver]
-    
-            #注意：这个是所有round结束之后
-            
+        final_refiner_to_solver = refiner_to_solver_rounds[-1]
+        solver_outputs = run_solver_latent_stage(
+            model_name_or_path=solver_model,
+            questions=questions,
+            refiner_latents=final_refiner_to_solver,
+            args=args,
+            batch_size=args.batch_size,
+            max_new_tokens=args.max_new_tokens,
+            do_sample=args.do_sample,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            device=device,
+            dtype=model_dtype,
+            trust_remote_code=trust_remote_code,
+            enable_thinking=enable_thinking,
+            task_types=task_types,
+            fn_names=fn_names,
+        )
 
-            
-            # agent1_outputs = []
-            # for i in range(len(questions)):
-            #     parts = [
-            #         f"r{rid + 1}_to_agent2={planner_to_refiner_desc_rounds[rid][i]}"
-            #         for rid in range(recursive_rounds)
-            #     ]
-            #     agent1_outputs.append("; ".join(parts))
+        planner_to_refiner_desc_rounds = [
+            [format_latent_info(x) for x in round_latents] for round_latents in planner_to_refiner_rounds
+        ]
+        refiner_to_solver_desc_rounds = [
+            [format_latent_info(x) for x in round_latents] for round_latents in refiner_to_solver_rounds
+        ]
+        feedback_to_planner_desc_rounds = [
+            [format_latent_info(x) for x in round_latents] for round_latents in feedback_to_planner_rounds
+        ]
+        solver_rollout_latents = [x for x in final_refiner_to_solver]
 
+        agent1_outputs = []
+        for i in range(len(questions)):
             parts = [
-                f"r{rid + 1}_to_agent2={planner_to_refiner_desc_rounds[rid][0]}"
+                f"r{rid + 1}_to_agent2={planner_to_refiner_desc_rounds[rid][i]}"
                 for rid in range(recursive_rounds)
             ]
-            
             agent1_outputs.append("; ".join(parts))
-            
-            # print(agent1_outputs, file=sys.stderr, flush=True)
-    
-            final_planner_desc = planner_to_refiner_desc_rounds[-1]
-            # agent2_inputs = []
 
+        final_planner_desc = planner_to_refiner_desc_rounds[-1]
+        agent2_inputs = []
+        for i, question in enumerate(questions):
             if is_code_eval:
                 if task_types is None:
                     raise RuntimeError("Missing task_types for code refiner slot prompt.")
-                fn_name = fn_names[0] if fn_names is not None else None
+                fn_name = fn_names[i] if fn_names is not None else None
                 a2_in = build_code_refiner_prompt_with_slot(
-                    questions[q_idx],
-                    task_types[q_idx],
+                    question,
+                    task_types[i],
                     fn_name=fn_name,
-                ).replace(PLANNER_SLOT, final_planner_desc[0])
+                ).replace(PLANNER_SLOT, final_planner_desc[i])
             else:
-                a2_in = build_math_refiner_prompt_with_slot(questions[q_idx]).replace(PLANNER_SLOT, final_planner_desc[0])
+                a2_in = build_math_refiner_prompt_with_slot(question).replace(PLANNER_SLOT, final_planner_desc[i])
             agent2_inputs.append(a2_in)
-    
-            # agent2_outputs = []
-            # for i in range(len(questions)):
-            #     parts = [
-            #         f"r{rid + 1}_to_agent3={refiner_to_solver_desc_rounds[rid][i]}"
-            #         for rid in range(recursive_rounds)
-            #     ]
-            #     agent2_outputs.append("; ".join(parts))
 
+        agent2_outputs = []
+        for i in range(len(questions)):
             parts = [
-                f"r{rid + 1}_to_agent3={refiner_to_solver_desc_rounds[rid][0]}"
+                f"r{rid + 1}_to_agent3={refiner_to_solver_desc_rounds[rid][i]}"
                 for rid in range(recursive_rounds)
             ]
             agent2_outputs.append("; ".join(parts))
 
-            final_refiner_desc = refiner_to_solver_desc_rounds[-1]
-            # agent3_inputs = []
+        final_refiner_desc = refiner_to_solver_desc_rounds[-1]
+        agent3_inputs = []
+        for i, question in enumerate(questions):
             if is_code_eval:
                 if task_types is None:
                     raise RuntimeError("Missing task_types for code solver slot prompt.")
-                fn_name = fn_names[q_idx] if fn_names is not None else None
+                fn_name = fn_names[i] if fn_names is not None else None
                 a3_in = build_code_solver_prompt_with_slots(
-                    questions[q_idx],
-                    task_types[q_idx],
+                    question,
+                    task_types[i],
                     args=args,
                     mas_shape=args.mas_shape,
                     fn_name=fn_name,
                 )
             else:
-                a3_in = build_math_solver_prompt_with_slots(questions[q_idx], args, mas_shape=args.mas_shape)
-            a3_in = a3_in.replace(REFINED_SLOT, final_refiner_desc[0])
+                a3_in = build_math_solver_prompt_with_slots(question, args, mas_shape=args.mas_shape)
+            a3_in = a3_in.replace(REFINED_SLOT, final_refiner_desc[i])
             agent3_inputs.append(a3_in)
-            agent3_outputs.append(solver_outputs[0])
+        agent3_outputs = solver_outputs
 
-            # agent3_outputs = solver_outputs
-
-            # print("agent3_outputs:===============================================", file=sys.stderr, flush=True)
-            # print(agent3_outputs, file=sys.stderr, flush=True)
-
-            # 先测试总结 checklist
-
-            # ori_code=extract_code(agent3_outputs[q_idx])
-            # if ori_code is not None:
-            #     r = extract_and_run_python(agent3_outputs[q_idx])
-            #     # print(r, file=sys.stderr, flush=True)
-            
-            #     if not r["success"]:
-            #         # 识别错误
-            #         user_prompt = (
-            #             "For code:\n"
-            #             + ori_code
-            #             + "\nThe compiler gives error: "
-            #             + r["error_type"]
-            #             + ":"
-            #             + r["error"]
-            #             + "fixed and put the final code inside one markdown code block, "
-            #               "for example ```python\\n<your solution code>\\n```"
-            #         )
-                
-        
-                
-            #         rendered_prompt = render_chat_prompt(
-            #             tokenizer_solver,
-            #             user_prompt,
-            #             enable_thinking,
-            #         )
-                
-            #         gen_kwargs = build_generation_kwargs(
-            #             tokenizer_solver,
-            #             max_new_tokens=args.max_new_tokens,
-            #             do_sample=args.do_sample,
-            #             temperature=args.temperature,
-            #             top_p=args.top_p,
-            #         )
-                
-            #         output = generate_text(
-            #             rendered_prompt,
-            #             model_solver,
-            #             tokenizer_solver,
-            #             device,
-            #             gen_kwargs,
-            #         )
-            #         agent3_outputs[q_idx] = output
-            #         # print(output, file=sys.stderr, flush=True)
-            #         # user_prompt = (
-            #         #     "For code:\n"
-            #         #     + ori_code
-            #         #     + "\nThe compiler gives error: "
-            #         #     + r["error_type"]
-            #         #     + ":"
-            #         #     + r["error"]
-            #         #     + "\nThe previous check list is:\n " + check_list
-            #         #     + "\nUpdate this error to the check list."
-            #         #     + "\nDo not write code."
-            #         #     + "\nYour response should be in the format of:"
-            #         #     + "\n1. error type, why it happens and how to avoid."
-            #         #     + "\n2. ..."
-            #         #     + "\n..."
-            #         # )
-    
-            #         # rendered_prompt = render_chat_prompt(
-            #         #     tokenizer_planner,
-            #         #     user_prompt,
-            #         #     enable_thinking,
-            #         # )
-                
-            #         # gen_kwargs = build_generation_kwargs(
-            #         #     tokenizer_planner,
-            #         #     max_new_tokens=args.max_new_tokens,
-            #         #     do_sample=args.do_sample,
-            #         #     temperature=args.temperature,
-            #         #     top_p=args.top_p,
-            #         # )
-                
-            #         # check_list = generate_text(
-            #         #     rendered_prompt,
-            #         #     model_planner,
-            #         #     tokenizer_planner,
-            #         #     device,
-            #         #     gen_kwargs,
-            #         # )
-                    
-            #         # print("updated checklist:========", file=sys.stderr, flush=True)
-            #         # print(check_list, file=sys.stderr, flush=True)
-            #         print("Error find !!!!!!!!!!!!!!!!!!!!!!!!!!!!!", file=sys.stderr, flush=True)
-            #     else:
-            #         print("No Error find ------------------------------", file=sys.stderr, flush=True)
-
-            
-            
-            
-            # Recursive-specific logging fields (full chat template)
-            a1_round1_prompts = [
-                build_planner_prompt_text(
-                    planner_questions[q_idx],
-                    q_idx
-                )
-            ]
-            
-            a1_roundk_prompts = [
-                build_planner_prompt_text(
-                    planner_questions[q_idx],
-                    q_idx,
-                    FEEDBACK_SLOT
-                )
-            ]
-            
-            
-            a1_round1_rendered = render_inputs_for_logging(
-                model_name_or_path=planner_model,
-                user_prompts=a1_round1_prompts,
-                trust_remote_code=trust_remote_code,
-                agent_name="agent1-r1",
-                enable_thinking=enable_thinking,
-            )
-            
-            a1_roundk_rendered = render_inputs_for_logging(
-                model_name_or_path=planner_model,
-                user_prompts=a1_roundk_prompts,
-                trust_remote_code=trust_remote_code,
-                agent_name="agent1-rk",
-                enable_thinking=enable_thinking,
-            )
-            
-            
-
-            
-            parts=[
-                f"[Round1 planner input]\n{a1_round1_rendered[0]}"
-            ]
-            
+        # Recursive-specific logging fields (full chat template)
+        a1_round1_prompts = [
+            build_planner_prompt_text(planner_questions[i], i)
+            for i in range(len(questions))
+        ]
+        a1_roundk_prompts = [
+            build_planner_prompt_text(planner_questions[i], i, FEEDBACK_SLOT)
+            for i in range(len(questions))
+        ]
+        a1_round1_rendered = render_inputs_for_logging(
+            model_name_or_path=planner_model,
+            user_prompts=a1_round1_prompts,
+            trust_remote_code=trust_remote_code,
+            agent_name="agent1-r1",
+            enable_thinking=enable_thinking,
+        )
+        a1_roundk_rendered = render_inputs_for_logging(
+            model_name_or_path=planner_model,
+            user_prompts=a1_roundk_prompts,
+            trust_remote_code=trust_remote_code,
+            agent_name="agent1-rk",
+            enable_thinking=enable_thinking,
+        )
+        agent1_inputs_for_log = []
+        for i in range(len(questions)):
+            parts = [f"[Round1 planner input]\n{a1_round1_rendered[i]}"]
             for rid in range(1, recursive_rounds):
-            
-                fb_desc = feedback_to_planner_desc_rounds[rid-1][0]
-            
-                parts.append(
-                    f"[Round{rid} feedback latent] {fb_desc}"
-                )
-            
-                parts.append(
-                    f"[Round{rid+1} planner input]\n{a1_roundk_rendered[0]}"
-                )
-            
-            
-            agent1_inputs_for_log.append(
-                "\n\n".join(parts)
-            )
+                fb_desc = feedback_to_planner_desc_rounds[rid - 1][i]
+                parts.append(f"[Round{rid} feedback latent] {fb_desc}")
+                parts.append(f"[Round{rid + 1} planner input]\n{a1_roundk_rendered[i]}")
+            agent1_inputs_for_log.append("\n\n".join(parts))
 
     ans_retry_count = 0
     ans_retry_max_new_tokens = int(args.ans_max_new_tokens)
@@ -4170,8 +2724,6 @@ def main() -> None:
             top_p=args.top_p,
             max_new_tokens=ans_retry_max_new_tokens,
         )
-
-        
         retry_target = "code block" if is_code_eval else "boxed/choice answer"
         print(
             f"[ans] retried {ans_retry_count} samples with missing {retry_target} "
@@ -4255,9 +2807,6 @@ def main() -> None:
             )
 
     agent3_outputs_by_rollout: List[List[str]] = [list(agent3_outputs)]
-    # print("agent3_outputs rollout:===============================================", file=sys.stderr, flush=True)
-    # print(agent3_outputs_by_rollout, file=sys.stderr, flush=True)
-    #num_rollouts 生成k次，用于衡量pass@k
     if args.num_rollouts > 1:
         for rollout_idx in range(1, args.num_rollouts):
             if args.do_sample:
@@ -4466,8 +3015,7 @@ def main() -> None:
                     fn_names=fn_names,
                 )
 
-            if args.ans:        
-
+            if args.ans:
                 rollout_outputs, _ = run_answer_retry_stage(
                     model_name_or_path=solver_model,
                     outputs=rollout_outputs,
@@ -4484,9 +3032,6 @@ def main() -> None:
 
             agent3_outputs_by_rollout.append(rollout_outputs)
 
-
-
-
     total = len(questions)
     result_jsonl_path = args.result_jsonl.strip()
     sample_records: List[Dict[str, object]] = []
@@ -4494,66 +3039,34 @@ def main() -> None:
     rollout_eval_code: List[List[Dict[str, Any]]] = []
     rollout_correct_counts: List[int] = []
 
-    #只有最后执行
-    # print("start eval", file=sys.stderr, flush=True)
-    eval_rows_code: List[Dict[str, Any]] = []
     for rollout_idx, outputs in enumerate(agent3_outputs_by_rollout):
         correct_count = 0
-        # print(len(outputs), file=sys.stderr, flush=True)
 
-
-        
         if is_code_eval:
             if sample_metadata is None:
                 raise RuntimeError("Missing LiveCodeBench metadata for code evaluation.")
-
+            eval_rows_code: List[Dict[str, Any]] = []
             eval_start_time = time.time()
             for i in range(total):
                 cleaned_output = clean_raw_output(outputs[i])
-
-                
-                
                 parsed_code = extract_python_code(cleaned_output)
-
-
-
-                
                 eval_sample = sample_metadata[i].get("eval_sample", {})
-                # print("eval sample", file=sys.stderr, flush=True)  
-                # print(eval_sample, file=sys.stderr, flush=True)
                 eval_result = evaluate_generated_code(
                     parsed_code,
                     eval_sample,
                     timeout_s=code_eval_timeout_s,
                 )
-            
                 is_correct = bool(eval_result.get("all_passed", False))
-            
                 if is_correct:
                     correct_count += 1
-            
                 eval_rows_code.append(
                     {
-                        # 问题
-                        "question": questions[i],
-            
-                        # agent 原始输出
-                        "agent_output": outputs[i],
-            
-                        # 清理后的代码
                         "parsed_code": parsed_code,
-            
-                        # 是否成功解析代码
                         "parse_ok": bool(parsed_code),
-            
-                        # 是否通过测试
                         "correct": is_correct,
-            
-                        # 详细测试结果
                         "eval": eval_result,
                     }
                 )
-            
                 if ((i + 1) % 10 == 0) or (i + 1 == total):
                     elapsed = time.time() - eval_start_time
                     print(
@@ -4561,11 +3074,7 @@ def main() -> None:
                         f"checked {i + 1}/{total} samples, correct={correct_count}, "
                         f"elapsed={elapsed:.1f}s"
                     )
-            
-            
             rollout_eval_code.append(eval_rows_code)
-            
-        
         else:
             eval_rows_math: List[Tuple[str, Optional[str], bool, str, str]] = []
             for i in range(total):
@@ -4587,20 +3096,6 @@ def main() -> None:
                 f"accuracy={rollout_acc:.2f}% ({correct_count}/{total})"
             )
 
-    # 保存 JSON
-    save_path = f"code_eval_rollout_{rollout_idx}.json"
-    
-    with open(save_path, "w", encoding="utf-8") as f:
-        json.dump(
-            eval_rows_code,
-            f,
-            indent=2,
-            ensure_ascii=False
-        )
-    
-    print(f"Saved evaluation results to {save_path}")
-
-    
     pass_correct_total = 0
     for i in range(total):
         if is_code_eval:
@@ -4825,70 +3320,6 @@ def main() -> None:
             }
             f.write(json.dumps(summary_record, ensure_ascii=False) + "\n")
         print(f"[jsonl] wrote {len(sample_records)} sample records to {result_jsonl_path}")
-
-
-def extract_code(agent_output: str) -> str:
-    """从 Agent 输出中提取第一个 Python 代码块"""
-    match = re.search(
-        r"```(?:python|py)?\s*\n?(.*?)```",
-        agent_output,
-        re.DOTALL | re.IGNORECASE
-    )
-
-    if not match:
-        return None
-
-    return match.group(1).strip()
-    
-def extract_and_run_python(agent_output: str):
-    """
-    从 Agent 输出中提取 Markdown Python 代码块并执行。
-
-    Returns:
-        {
-            "code": 提取出的代码,
-            "success": 是否执行成功,
-            "error_type": 错误类型（成功时为 None）,
-            "error": 错误信息（成功时为 None）
-        }
-    """
-
-    # 1. 提取 ```python ... ``` 代码块
-    match = re.search(
-        r"```(?:python|py)?\s*\n?(.*?)```",
-        agent_output,
-        re.DOTALL | re.IGNORECASE
-    )
-
-    if not match:
-        return {
-            "code": None,
-            "success": False,
-            "error_type": "CodeNotFound",
-            "error": "没有找到 Python 代码块"
-        }
-
-    code = match.group(1).strip()
-
-    # 2. 尝试执行
-    try:
-        exec(code, {"__builtins__": __builtins__})
-
-        return {
-            "code": code,
-            "success": True,
-            "error_type": None,
-            "error": None
-        }
-
-    except Exception as e:
-        return {
-            "code": code,
-            "success": False,
-            "error_type": type(e).__name__,
-            "error": str(e)
-        }
-
 
 if __name__ == "__main__":
     main()
