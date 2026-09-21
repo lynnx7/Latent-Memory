@@ -573,46 +573,12 @@ def build_code_solver_prompt(
     final_instruction = (
         "Solve the problem and put the final code inside one markdown code block, "
         "for example ```python\\n<your solution code>\\n```."
-
     )
-    # "\nDon't make the following error :\n"+check_list
-    if args is not None and int(getattr(args, "solver_pre_question", 0)) == 1:
-        if past_q is not None:
-            return (
-                "You are a solver agent in a multi-agent coding system.\n"
-                f"{interface}\n"
-                
-                "Relevant Previous Example:\n"
-                "Problem:\n"
-                f"{past_q}\n"
-                "\nSolution:\n"
-                f"{past_ans}\n"
-                "\n---\nThe current programming problem is:\n"
-                f"{question}\n"
-                "Here is the refined plan:\n"
-                "Refined Plan:\n"
-                f"{refined_plan}\n"
-                f"{final_instruction}"
-            )
-        else:
-            return (
-                "You are a solver agent in a multi-agent coding system.\n"
-                f"{interface}\n"
-                "\n---\nThe programming problem is:\n"
-                f"{question}\n"
-                "Here is the refined plan:\n"
-                "Refined Plan:\n"
-                f"{refined_plan}\n"
-                f"{final_instruction}"
-            )
 
     return (
-        "You are a solver agent in a multi-agent coding system.\n"
+        "You are a solver agent in coding system.\n"
         f"{interface}\n"
-        "Here is the refined plan:\n"
-        "Refined Plan:\n"
-        f"{refined_plan}\n"
-        "\n---\nThe programming problem is:\n"
+        "The programming problem is:\n"
         f"{question}\n"
         f"{final_instruction}"
     )
