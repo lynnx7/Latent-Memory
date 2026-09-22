@@ -731,17 +731,11 @@ def build_math_solver_prompt(
             "The question is:\n"
             "Question:\n"
             f"{question}\n"
-            "Here is the refined plan:\n"
-            "Refined Plan:\n"
-            f"{refined_plan}\n"
             f"{final_instruction}"
         )
     question_to_final_sep = "\n" if use_choice_old_prompt else "\n\n"
     return (
         "You are a solver agent in a multi-agent system.\n"
-        "Here is the refined plan:\n"
-        "Refined Plan:\n"
-        f"{refined_plan}\n"
         "The question is:\n"
         "Question:\n"
         f"{question}{question_to_final_sep}"
