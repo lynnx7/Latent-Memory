@@ -63,5 +63,4 @@ jobs:
                 --style sequential_scaled \
                 --dataset math500 \
                 --device cuda \
-                --num_recursive_rounds 1 \
-                --num_samples 3
+                --num_recursive_rounds 1
