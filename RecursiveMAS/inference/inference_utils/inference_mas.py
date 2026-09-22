@@ -3813,7 +3813,7 @@ def main() -> None:
                 trust_remote_code=trust_remote_code,
                 enable_thinking=enable_thinking,
                 task_types=task_types,
-                fn_name=fn_names[q_idx],
+                fn_name=None,
                 mem_bank=mem_bank,
                 check_list=check_list
             )
