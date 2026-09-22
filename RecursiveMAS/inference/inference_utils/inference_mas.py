@@ -3894,54 +3894,54 @@ def main() -> None:
             # agent3_inputs.append(a3_in)
             agent3_outputs.append(solver_outputs[0])
 
-            cleaned_output = clean_raw_output(solver_outputs[0])
+            # cleaned_output = clean_raw_output(solver_outputs[0])
 
-            parsed_code = extract_python_code(cleaned_output)
+            # parsed_code = extract_python_code(cleaned_output)
 
-            eval_sample = sample_metadata[q_idx].get("eval_sample", {})
-            # print("eval sample", file=sys.stderr, flush=True)  
-            # print(eval_sample, file=sys.stderr, flush=True)
-            eval_result = evaluate_generated_code(
-                parsed_code,
-                eval_sample,
-                timeout_s=code_eval_timeout_s,
-            )
+            # eval_sample = sample_metadata[q_idx].get("eval_sample", {})
+            # # print("eval sample", file=sys.stderr, flush=True)  
+            # # print(eval_sample, file=sys.stderr, flush=True)
+            # eval_result = evaluate_generated_code(
+            #     parsed_code,
+            #     eval_sample,
+            #     timeout_s=code_eval_timeout_s,
+            # )
         
-            is_correct = bool(eval_result.get("all_passed", False))
+            # is_correct = bool(eval_result.get("all_passed", False))
         
-            # if is_correct:
-            #     correct_count += 1
+            # # if is_correct:
+            # #     correct_count += 1
         
-            eval_rows_code = {
-                    # 问题
-                    "question": questions[q_idx],
+            # eval_rows_code = {
+            #         # 问题
+            #         "question": questions[q_idx],
         
-                    # agent 原始输出
-                    "agent_output": solver_outputs[0],
+            #         # agent 原始输出
+            #         "agent_output": solver_outputs[0],
         
-                    # 清理后的代码
-                    "parsed_code": parsed_code,
+            #         # 清理后的代码
+            #         "parsed_code": parsed_code,
         
-                    # 是否成功解析代码
-                    "parse_ok": bool(parsed_code),
+            #         # 是否成功解析代码
+            #         "parse_ok": bool(parsed_code),
         
-                    # 是否通过测试
-                    "correct": is_correct,
+            #         # 是否通过测试
+            #         "correct": is_correct,
         
-                    # 详细测试结果
-                    "eval": eval_result,
-                }
+            #         # 详细测试结果
+            #         "eval": eval_result,
+            #     }
             
 
-            save_path = f"code_eval_rollout_{q_idx}.json"
+            # save_path = f"code_eval_rollout_{q_idx}.json"
     
-            with open(save_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    eval_rows_code,
-                    f,
-                    indent=2,
-                    ensure_ascii=False
-                )
+            # with open(save_path, "w", encoding="utf-8") as f:
+            #     json.dump(
+            #         eval_rows_code,
+            #         f,
+            #         indent=2,
+            #         ensure_ascii=False
+            #     )
 
             
             
