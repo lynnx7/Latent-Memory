@@ -61,6 +61,7 @@ jobs:
 
           uv run python inference/run.py \
                 --style sequential_scaled \
-                --dataset mbppplus \
+                --dataset math500 \
                 --device cuda \
-                --num_recursive_rounds 1
+                --num_recursive_rounds 1 \
+                --num_samples 3
